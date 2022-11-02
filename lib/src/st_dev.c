@@ -1728,14 +1728,6 @@ int st_dev_create(struct st_main_impl* impl) {
     inf = st_if(impl, i);
     port_type = inf->port_type;
 
-#if RTE_VERSION >= RTE_VERSION_NUM(21, 11, 0, 0)
-    /* DPDK 21.11 support start time sync before rte_eth_dev_start */
-    if ((st_has_ptp_service(impl) || st_has_ebu(impl)) && (port_type == ST_PORT_PF)) {
-      ret = dev_start_timesync(impl, i);
-      if (ret >= 0) inf->feature |= ST_IF_FEATURE_TIMESYNC;
-    }
-#endif
-
   retry:
     ret = dev_start_port(impl, i);
     if (ret < 0) {
