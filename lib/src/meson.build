@@ -28,6 +28,8 @@ sources = files(
 	'st_admin.c',
 	'st_config.c',
 	'st_socket.c',
+    'mave.c',
+    'servo.c',
 )
 
 if get_option('enable_kni') == true
