@@ -1304,6 +1304,8 @@ struct st_rl_shaper {
 };
 
 struct st_rx_flow {
+  enum rte_flow_item_type type;
+  rte_be16_t ether_type;
   uint8_t dip_addr[ST_IP_ADDR_LEN]; /* rx destination IP */
   uint8_t sip_addr[ST_IP_ADDR_LEN]; /* source IP */
   uint16_t dst_port;                /* udp destination port */

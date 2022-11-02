@@ -629,11 +629,11 @@ static int ptp_init(struct st_main_impl* impl, struct st_ptp_impl* ptp,
   /* create rx queue */
   struct st_rx_flow flow;
   memset(&flow, 0, sizeof(flow));
-  rte_memcpy(flow.dip_addr, ptp->mcast_group_addr, ST_IP_ADDR_LEN);
-  rte_memcpy(flow.sip_addr, st_sip_addr(impl, port), ST_IP_ADDR_LEN);
+  flow.type = RTE_FLOW_ITEM_TYPE_ETH;
+  flow.ether_type = rte_cpu_to_be_16(RTE_ETHER_TYPE_1588);
   flow.port_flow = false;
-  flow.dst_port = ST_PTP_UDP_GEN_PORT;
   ret = st_dev_request_rx_queue(impl, port, &ptp->rx_queue_id, &flow);
+
   if (ret < 0) {
     err("%s(%d), ptp_rx_q create fail\n", __func__, port);
     return ret;

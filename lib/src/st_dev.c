@@ -600,6 +600,8 @@ static struct rte_flow* dev_rx_queue_create_flow(struct st_interface* inf, uint1
 
   uint16_t port_id = inf->port_id;
   enum st_driver_type drv_type = inf->drv_type;
+  
+  if (flow->port_flow) flow->type = RTE_FLOW_ITEM_TYPE_IPV4;
 
   /* only raw flow can be applied on the hdr split queue */
   if (st_if_hdr_split_pool(inf, q)) {
@@ -608,35 +610,67 @@ static struct rte_flow* dev_rx_queue_create_flow(struct st_interface* inf, uint1
 
   /* queue */
   queue.index = q;
-
-  /* nothing for eth flow */
+  
   memset(&eth_spec, 0, sizeof(eth_spec));
   memset(&eth_mask, 0, sizeof(eth_mask));
 
-  /* ipv4 flow */
-  memset(&ipv4_spec, 0, sizeof(ipv4_spec));
-  memset(&ipv4_mask, 0, sizeof(ipv4_mask));
-  ipv4_spec.hdr.next_proto_id = IPPROTO_UDP;
+  memset(pattern, 0, sizeof(pattern));
+  pattern[0].type = RTE_FLOW_ITEM_TYPE_ETH;
+  
+  switch(flow->type)
+  {
+    case RTE_FLOW_ITEM_TYPE_ETH:
+      eth_mask.type = ~eth_mask.type;
+      pattern[0].spec = &eth_spec;
+      pattern[0].mask = &eth_mask;
+      eth_spec.type = flow->ether_type;
+      pattern[1].type = RTE_FLOW_ITEM_TYPE_END;
+      break;
+    case RTE_FLOW_ITEM_TYPE_IPV4:
+      /* ipv4 flow */
+      memset(&ipv4_spec, 0, sizeof(ipv4_spec));
+      memset(&ipv4_mask, 0, sizeof(ipv4_mask));
+      ipv4_spec.hdr.next_proto_id = IPPROTO_UDP;
 
-  if (drv_type != ST_DRV_IGC) {
-    memset(&ipv4_mask.hdr.dst_addr, 0xFF, ST_IP_ADDR_LEN);
-    if (st_is_multicast_ip(flow->dip_addr)) {
-      rte_memcpy(&ipv4_spec.hdr.dst_addr, flow->dip_addr, ST_IP_ADDR_LEN);
-    } else {
-      rte_memcpy(&ipv4_spec.hdr.src_addr, flow->dip_addr, ST_IP_ADDR_LEN);
-      rte_memcpy(&ipv4_spec.hdr.dst_addr, flow->sip_addr, ST_IP_ADDR_LEN);
-      memset(&ipv4_mask.hdr.src_addr, 0xFF, ST_IP_ADDR_LEN);
-    }
+      if (drv_type != ST_DRV_IGC) {
+        memset(&ipv4_mask.hdr.dst_addr, 0xFF, ST_IP_ADDR_LEN);
+        if (st_is_multicast_ip(flow->dip_addr)) {
+          rte_memcpy(&ipv4_spec.hdr.dst_addr, flow->dip_addr, ST_IP_ADDR_LEN);
+        } else {
+          rte_memcpy(&ipv4_spec.hdr.src_addr, flow->dip_addr, ST_IP_ADDR_LEN);
+          rte_memcpy(&ipv4_spec.hdr.dst_addr, flow->sip_addr, ST_IP_ADDR_LEN);
+          memset(&ipv4_mask.hdr.src_addr, 0xFF, ST_IP_ADDR_LEN);
+        }
+      }
+      
+      /* udp flow */
+      if (flow->port_flow) {
+        memset(&udp_spec, 0, sizeof(udp_spec));
+        memset(&udp_mask, 0, sizeof(udp_mask));
+        udp_spec.hdr.dst_port = htons(flow->dst_port);
+        udp_mask.hdr.dst_port = htons(0xFFFF);
+      }
+      
+      pattern[0].spec = (drv_type == ST_DRV_IGC) ? NULL : &eth_spec;
+      pattern[0].mask = (drv_type == ST_DRV_IGC) ? NULL : &eth_mask;
+      pattern[1].type = RTE_FLOW_ITEM_TYPE_IPV4;
+      pattern[1].spec = &ipv4_spec;
+      pattern[1].mask = &ipv4_mask;
+      if (flow->port_flow) {
+        pattern[2].type = RTE_FLOW_ITEM_TYPE_UDP;
+        pattern[2].spec = &udp_spec;
+        pattern[2].mask = &udp_mask;
+        pattern[3].type = RTE_FLOW_ITEM_TYPE_END;
+      } else {
+        pattern[2].type = RTE_FLOW_ITEM_TYPE_END;
+      }
+      
+      break;
+    default:
+      err("%s(%d), flow type not supported.\n", __func__, port_id);
+      return NULL;    
   }
-
-  /* udp flow */
-  if (flow->port_flow) {
-    memset(&udp_spec, 0, sizeof(udp_spec));
-    memset(&udp_mask, 0, sizeof(udp_mask));
-    udp_spec.hdr.dst_port = htons(flow->dst_port);
-    udp_mask.hdr.dst_port = htons(0xFFFF);
-  }
-
+  
   memset(&attr, 0, sizeof(attr));
   attr.ingress = 1;
 
@@ -644,23 +678,7 @@ static struct rte_flow* dev_rx_queue_create_flow(struct st_interface* inf, uint1
   action[0].type = RTE_FLOW_ACTION_TYPE_QUEUE;
   action[0].conf = &queue;
   action[1].type = RTE_FLOW_ACTION_TYPE_END;
-
-  memset(pattern, 0, sizeof(pattern));
-  pattern[0].type = RTE_FLOW_ITEM_TYPE_ETH;
-  pattern[0].spec = (drv_type == ST_DRV_IGC) ? NULL : &eth_spec;
-  pattern[0].mask = (drv_type == ST_DRV_IGC) ? NULL : &eth_mask;
-  pattern[1].type = RTE_FLOW_ITEM_TYPE_IPV4;
-  pattern[1].spec = &ipv4_spec;
-  pattern[1].mask = &ipv4_mask;
-  if (flow->port_flow) {
-    pattern[2].type = RTE_FLOW_ITEM_TYPE_UDP;
-    pattern[2].spec = &udp_spec;
-    pattern[2].mask = &udp_mask;
-    pattern[3].type = RTE_FLOW_ITEM_TYPE_END;
-  } else {
-    pattern[2].type = RTE_FLOW_ITEM_TYPE_END;
-  }
-
+  
   ret = rte_flow_validate(port_id, &attr, pattern, action, &error);
   if (ret < 0) {
     err("%s(%d), rte_flow_validate fail %d for queue %d, %s\n", __func__, port_id, ret, q,
