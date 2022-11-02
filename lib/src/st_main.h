@@ -26,6 +26,8 @@
 #include "st_mem.h"
 #include "st_pkt.h"
 #include "st_platform.h"
+#include "servo.h"
+#include "mave.h"
 
 #ifndef _ST_LIB_MAIN_HEAD_H_
 #define _ST_LIB_MAIN_HEAD_H_
@@ -121,6 +123,8 @@
 #define ST_IF_FEATURE_TX_OFFLOAD_IPV4_CKSUM (ST_BIT32(5))
 /* Rx queue support hdr split */
 #define ST_IF_FEATURE_RXQ_OFFLOAD_BUFFER_SPLIT (ST_BIT32(6))
+#define ST_IF_FEATURE_TX_OFFLOAD_MBUF_FAST_FREE (ST_BIT32(8))
+
 
 #define ST_IF_STAT_PORT_CONFIGED (ST_BIT32(0))
 #define ST_IF_STAT_PORT_STARTED (ST_BIT32(1))
@@ -221,8 +225,16 @@ enum st40_tx_frame_status {
   ST40_TX_STAT_SENDING_PKTS,
 };
 
+struct st_phc2sys_impl {
+  struct pi_servo *servo;
+  long realtime_hz;
+  long realtime_nominal_tick;
+  int64_t stat_delta_max;  
+};
+
 struct st_ptp_impl {
   struct st_main_impl* impl;
+  struct st_phc2sys_impl phc2sys;
   enum st_port port;
   uint16_t port_id;
   uint16_t tx_queue_id;
@@ -251,6 +263,10 @@ struct st_ptp_impl {
   uint64_t t3;
   uint16_t t3_sequence_id;
   uint64_t t4;
+  
+  struct pi_servo *servo;
+  int64_t  path_delay_avg;
+  struct mave *path_delay_acc;  
   /* result */
   uint64_t delta_result_cnt;
   uint64_t delta_result_sum;

@@ -833,6 +833,12 @@ static int dev_config_port(struct st_main_impl* impl, enum st_port port) {
 #endif
   }
 
+  if (inf->feature & ST_IF_FEATURE_TX_OFFLOAD_MBUF_FAST_FREE) {
+#if RTE_VERSION >= RTE_VERSION_NUM(22, 3, 0, 0)
+    port_conf.txmode.offloads |= RTE_ETH_TX_OFFLOAD_MBUF_FAST_FREE;
+#endif
+  }
+
   ret = rte_eth_dev_configure(port_id, nb_rx_q, nb_tx_q, &port_conf);
   if (ret < 0) {
     err("%s(%d), rte_eth_dev_configure fail %d\n", __func__, port, ret);
@@ -2067,6 +2073,13 @@ int st_dev_if_init(struct st_main_impl* impl) {
 #else
     if (dev_info.tx_offload_capa & DEV_TX_OFFLOAD_IPV4_CKSUM)
       inf->feature |= ST_IF_FEATURE_TX_OFFLOAD_IPV4_CKSUM;
+#endif
+
+#if RTE_VERSION >= RTE_VERSION_NUM(22, 3, 0, 0)
+    /* Detect launch time capability */
+    if (dev_info.tx_offload_capa & RTE_ETH_TX_OFFLOAD_MBUF_FAST_FREE) {
+        inf->feature |= ST_IF_FEATURE_TX_OFFLOAD_MBUF_FAST_FREE;
+    }
 #endif
 
     if (st_has_ebu(impl) &&
