@@ -305,7 +305,7 @@ int main(int argc, char** argv) {
       return -EIO;
     }
   }
-
+/*
   ret = st_app_tx_video_sessions_init(ctx);
   if (ret < 0) {
     err("%s, st_app_tx_video_sessions_init fail %d\n", __func__, ret);
@@ -347,7 +347,7 @@ int main(int argc, char** argv) {
     st_app_ctx_free(ctx);
     return -EIO;
   }
-
+*/
   ret = st_app_rx_video_sessions_init(ctx);
   if (ret < 0) {
     err("%s, st_app_rx_video_sessions_init fail %d\n", __func__, ret);
