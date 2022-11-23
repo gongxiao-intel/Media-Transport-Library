@@ -1,14 +1,14 @@
 {
     "interfaces": [
         {
-            "name": "0000:af:00.0",
-            "ip": "192.168.84.188"
+            "name": "0000:01:00.0",
+            "ip": "192.168.1.1"
         }
     ],
     "tx_sessions": [
         {
             "dip": [
-                "239.168.84.1"
+                "192.168.1.2"
             ],
             "interface": [
                 0
@@ -22,9 +22,9 @@
                     "start_port": 20000,
                     "payload_type": 112,
                     "tr_offset": "default",
-                    "video_format": "i1080p59",
+                    "video_format": "i1080p29",
                     "pg_format": "YUV_422_10bit",
-                    "video_url": "./test.yuv"
+                    "video_url": "/home/uzel/Downloads/test_rfc4175_yuv422be10packed.yuv"
                 }
             ]
         }
