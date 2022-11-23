@@ -32,6 +32,8 @@ int st_dev_dst_ip_mac(struct st_main_impl* impl, uint8_t dip[ST_IP_ADDR_LEN],
 
 int st_dev_request_tx_queue(struct st_main_impl* impl, enum st_port port,
                             uint16_t* queue_id, uint64_t bytes_per_sec);
+int st_dev_request_tx_launchtime_queue(struct st_main_impl* impl, enum st_port port,
+                            uint16_t* queue_id, uint64_t bytes_per_sec);                            
 int st_dev_request_rx_queue(struct st_main_impl* impl, enum st_port port,
                             uint16_t* queue_id, struct st_rx_flow* flow);
 int st_dev_free_tx_queue(struct st_main_impl* impl, enum st_port port, uint16_t queue_id);

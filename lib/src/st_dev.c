@@ -1513,7 +1513,42 @@ int st_dev_request_tx_queue(struct st_main_impl* impl, enum st_port port,
   int ret;
 
   st_pthread_mutex_lock(&inf->tx_queues_mutex);
-  for (q = 0; q < inf->max_tx_queues; q++) {
+  for (q = 1; q < inf->max_tx_queues; q++) {
+    tx_queue = &inf->tx_queues[q];
+    if (!tx_queue->active) {
+      if (inf->tx_pacing_way == ST21_TX_PACING_WAY_RL) {
+        ret = dev_tx_queue_set_rl_rate(impl, port, q, bytes_per_sec);
+        if (ret < 0) {
+          err("%s(%d), fallback to tsc as rl fail\n", __func__, port);
+          inf->tx_pacing_way = ST21_TX_PACING_WAY_TSC;
+        }
+      }
+      tx_queue->bps = bytes_per_sec;
+      tx_queue->active = true;
+      *queue_id = q;
+      st_pthread_mutex_unlock(&inf->tx_queues_mutex);
+      if (inf->tx_pacing_way == ST21_TX_PACING_WAY_RL)
+        info("%s(%d), q %d with speed %" PRIu64 "\n", __func__, port, q, bytes_per_sec);
+      else
+        info("%s(%d), q %d without rl\n", __func__, port, q);
+      return 0;
+    }
+  }
+  st_pthread_mutex_unlock(&inf->tx_queues_mutex);
+
+  err("%s(%d), fail to find free tx queue\n", __func__, port);
+  return -ENOMEM;
+}
+
+int st_dev_request_tx_launchtime_queue(struct st_main_impl* impl, enum st_port port,
+                            uint16_t* queue_id, uint64_t bytes_per_sec) {
+  struct st_interface* inf = st_if(impl, port);
+  uint16_t q;
+  struct st_tx_queue* tx_queue;
+  int ret;
+
+  st_pthread_mutex_lock(&inf->tx_queues_mutex);
+  for (q = 0; q < 1; q++) {
     tx_queue = &inf->tx_queues[q];
     if (!tx_queue->active) {
       if (inf->tx_pacing_way == ST21_TX_PACING_WAY_RL) {

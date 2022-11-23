@@ -1646,12 +1646,20 @@ static int tv_init_hw(struct st_main_impl* impl, struct st_tx_video_sessions_mgr
   struct rte_mempool* pad_mempool;
   struct rte_mbuf* pad;
   enum st_port port;
+  struct st_interface* inf;
 
   for (int i = 0; i < num_port; i++) {
     port = st_port_logic2phy(s->port_maps, i);
     port_id = st_port_id(impl, port);
 
-    ret = st_dev_request_tx_queue(impl, port, &queue, tv_rl_bps(s));
+    inf = st_if(impl, port);
+    if (inf->tx_pacing_way == ST21_TX_PACING_WAY_TSN) {
+      ret = st_dev_request_tx_launchtime_queue(impl, port, &queue, tv_rl_bps(s));
+    }
+    else {
+      ret = st_dev_request_tx_queue(impl, port, &queue, tv_rl_bps(s));
+    }
+
     if (ret < 0) {
       tv_uinit_hw(impl, s);
       return ret;
