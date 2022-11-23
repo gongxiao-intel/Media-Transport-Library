@@ -88,7 +88,7 @@ Precision Time Protocol (PTP) provides global microsecond accuracy timing of all
 #### 3.5 Run sample app with json config
 Below is the command to run one video tx/rx session with json config, customize the config item in json as your setup.
 ```bash
-./build/app/RxTxApp --config_file config/test_tx_1port_1v.json
+./build/app/RxTxApp --ptp --config_file config/test_tx_1port_1v.json --lcores 1,2,3
 ```
 If it runs well, you will see below similar log output periodically.
 ```bash
