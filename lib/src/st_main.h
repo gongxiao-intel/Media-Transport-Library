@@ -123,6 +123,9 @@
 #define ST_IF_FEATURE_TX_OFFLOAD_IPV4_CKSUM (ST_BIT32(5))
 /* Rx queue support hdr split */
 #define ST_IF_FEATURE_RXQ_OFFLOAD_BUFFER_SPLIT (ST_BIT32(6))
+/* tx based on launch time */
+#define ST_IF_FEATURE_TX_OFFLOAD_SEND_ON_TIMESTAMP (ST_BIT32(7))
+
 #define ST_IF_FEATURE_TX_OFFLOAD_MBUF_FAST_FREE (ST_BIT32(8))
 
 
@@ -1396,6 +1399,12 @@ struct st_interface {
   uint64_t (*ptp_get_time_fn)(struct st_main_impl* impl, enum st_port port);
 
   enum st21_tx_pacing_way tx_pacing_way;
+  
+  /* tx timestamp register */
+  int tx_dynfield_offset;
+  /* tx launch time enable flag */
+  uint64_t tx_launch_time_flag;
+  
 };
 
 struct st_lcore_shm {
