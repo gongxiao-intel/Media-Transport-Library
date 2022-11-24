@@ -1,7 +1,7 @@
-From 91c50af11865bc391fe10f0624f6534f58b8cb26 Mon Sep 17 00:00:00 2001
+From b589467f1b87a3cce0db6d538ae696d5be011aaa Mon Sep 17 00:00:00 2001
 From: "Du, Frank" <frank.du@intel.com>
 Date: Tue, 30 Aug 2022 01:42:25 -0400
-Subject: [PATCH 9/9] ice: fix ice_interrupt_handler panic when stop
+Subject: [PATCH 09/12] ice: fix ice_interrupt_handler panic when stop
 
 rte_intr_callback_unregister may fail when irq cb is handling.
 
@@ -11,10 +11,10 @@ Signed-off-by: Du, Frank <frank.du@intel.com>
  1 file changed, 2 insertions(+), 2 deletions(-)
 
 diff --git a/drivers/net/ice/ice_ethdev.c b/drivers/net/ice/ice_ethdev.c
-index 62ebf64add..81b1ea6b63 100644
+index f07fdb71e4..d39f350df5 100644
 --- a/drivers/net/ice/ice_ethdev.c
 +++ b/drivers/net/ice/ice_ethdev.c
-@@ -2581,8 +2581,8 @@ ice_dev_close(struct rte_eth_dev *dev)
+@@ -2577,8 +2577,8 @@ ice_dev_close(struct rte_eth_dev *dev)
  	rte_intr_disable(intr_handle);
  
  	/* unregister callback func from eal lib */
@@ -26,5 +26,5 @@ index 62ebf64add..81b1ea6b63 100644
  	return ret;
  }
 -- 
-2.30.2
+2.25.1
 

@@ -1,7 +1,7 @@
-From 08c0412deef87d6d1504d4ccc4323f1b592c6bee Mon Sep 17 00:00:00 2001
+From acf16e21cc10f4151e4bd11e6ade435b7200e03b Mon Sep 17 00:00:00 2001
 From: "Du, Frank" <frank.du@intel.com>
 Date: Tue, 2 Aug 2022 13:37:33 +0800
-Subject: [PATCH 4/6] net/ice: revert PF ICE rate limit to non queue group
+Subject: [PATCH 04/12] net/ice: revert PF ICE rate limit to non queue group
  version
 
 queue group not support runtime
@@ -432,5 +432,5 @@ index 34a0bfcff8..65eed0acbd 100644
  		}
  	}
 -- 
-2.30.2
+2.25.1
 

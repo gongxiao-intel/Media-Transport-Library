@@ -1,7 +1,7 @@
-From 1c0a3aae6553a5cf8e89c0f442bcdebdc447d1e0 Mon Sep 17 00:00:00 2001
+From 5f294d2a080450c46ca6af30a9b4d292626d4955 Mon Sep 17 00:00:00 2001
 From: Wenjun Wu <wenjun1.wu@intel.com>
 Date: Tue, 28 Dec 2021 15:59:08 +0800
-Subject: [PATCH 5/6] net/iavf: support max burst size configuration
+Subject: [PATCH 05/12] net/iavf: support max burst size configuration
 
 This patch adds support for max burst size configuration for
 TX scheduler. This feature can be tuned on by devargs:
@@ -205,5 +205,5 @@ index 21bd1e2193..0de2e6531c 100644
  iavf_add_del_mc_addr_list(struct iavf_adapter *adapter,
  			struct rte_ether_addr *mc_addrs,
 -- 
-2.30.2
+2.25.1
 

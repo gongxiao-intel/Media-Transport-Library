@@ -1,7 +1,7 @@
-From 268387498acafdb9df9701d8c54b6c5be2fa1fdd Mon Sep 17 00:00:00 2001
+From e8ba25b6959c486cd2715cca06bad0566fd5e42f Mon Sep 17 00:00:00 2001
 From: "Du, Frank" <frank.du@intel.com>
 Date: Tue, 2 Aug 2022 13:52:14 +0800
-Subject: [PATCH 2/6] net/af_xdp: parse numa node id from sysfs
+Subject: [PATCH 02/12] net/af_xdp: parse numa node id from sysfs
 
 Get from /sys/class/net/{if}/device/numa_node
 
@@ -54,5 +54,5 @@ index fce649c2a1..2b561caeee 100644
  					busy_budget;
  
 -- 
-2.30.2
+2.25.1
 
