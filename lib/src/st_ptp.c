@@ -148,6 +148,7 @@ static void phc2sys_adjust(struct st_ptp_impl* ptp) {
   
   ptp_timesync_lock(ptp);
   shortest_delay = UINT64_MAX;
+  offset = 0;
   for(uint8_t i = 0; i < 10; i ++) {
     clock_gettime(CLOCK_REALTIME, &ts1_sys);
     ret = rte_eth_timesync_read_time(ptp->port_id, &ts_phc);
