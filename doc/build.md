@@ -21,7 +21,6 @@ sudo pip install pyelftools ninja
 ```bash
 git clone  https://github.com/intel-innersource/networking.dataplane.dpdk.next-net-intel.git dpdk
 cd dpdk
-git checkout simei_poc_launchtime
 git checkout 916ce02a6d6ec41d212c49aab391c0630f3bd019
 ```
 
@@ -44,7 +43,7 @@ git am $dpdk_st_kahawai/patches/dpdk/22.07/0012-igc-fix-other-queue-packets-laun
 
 #### 2.3 Build and install DPDK library
 ```bash
-meson build
+meson -Dexamples=timesync build
 ninja -C build
 cd build
 sudo ninja install
