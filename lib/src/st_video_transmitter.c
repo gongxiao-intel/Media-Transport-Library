@@ -405,12 +405,12 @@ static int video_trs_launch_time_tasklet(struct st_main_impl* impl,
                                  enum st_session_port s_port) {
   unsigned int bulk = 1; /* only one packet now for tsc */
   struct rte_ring* ring = s->ring[s_port];
-  int tx;
+  int tx = 0;
   unsigned int n;
   uint64_t target_ptp;
   uint16_t port_id = s->port_id[s_port];
   struct st_interface* inf = st_if(impl, port_id);
-  
+
   /* check if any inflight pkts in transmitter */
   if (s->trs_inflight_num[s_port] > 0) {
     tx = rte_eth_tx_burst(s->port_id[s_port], s->queue_id[s_port],
@@ -467,10 +467,10 @@ static int video_trs_launch_time_tasklet(struct st_main_impl* impl,
   /* Put tx timestamp into transmit descriptor */
   pkts[0]->ol_flags |= inf->tx_launch_time_flag;
   *RTE_MBUF_DYNFIELD(pkts[0], inf->tx_dynfield_offset, uint64_t *) = target_ptp;    
-  
+
   tx = rte_eth_tx_burst(s->port_id[s_port], s->queue_id[s_port], &pkts[0], valid_bulk);
   s->stat_pkts_burst += tx;
-
+  
   if (tx < valid_bulk) {
     unsigned int i;
     unsigned int remaining = valid_bulk - tx;

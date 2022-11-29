@@ -319,7 +319,7 @@ static int tv_init_pacing(struct st_main_impl* impl, struct st_tx_video_session_
     pacing->warm_pkts = 0;
   }
 
-  info("%s[%02d], trs %f trOffset %f warm pkts %u\n", __func__, idx, pacing->trs,
+  info("%s[%02d], trs %" PRIu64 " trOffset %" PRIu64 " warm pkts %u\n", __func__, idx, pacing->trs,
        pacing->tr_offset, troffset_warm_pkts);
 
   int num_port = s->ops.num_port;

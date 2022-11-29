@@ -435,19 +435,19 @@ enum st_session_type {
 
 /* timing for Packet Read Schedule */
 struct st_tx_video_pacing {
-  double trs;             /* in ns for of 2 consecutive packets, T-Frame / N-Packets */
-  double tr_offset;       /* in ns, tr offset time of each frame */
+  uint64_t trs;             /* in ns for of 2 consecutive packets, T-Frame / N-Packets */
+  uint64_t tr_offset;       /* in ns, tr offset time of each frame */
   uint32_t tr_offset_vrx; /* packets unit, VRX start value of each frame */
-  double frame_time;      /* time of the frame in nanoseconds */
-  double frame_time_sampling; /* time of the frame in sampling(90k) */
+  uint64_t frame_time;      /* time of the frame in nanoseconds */
+  uint64_t frame_time_sampling; /* time of the frame in sampling(90k) */
   uint32_t warm_pkts;         /* pkts for RL pacing warm boot */
-  float pad_interval;         /* padding pkt interval(pkts level) for RL pacing */
+  uint64_t pad_interval;         /* padding pkt interval(pkts level) for RL pacing */
 
   uint64_t cur_epochs;     /* epoch of current frame */
   uint32_t cur_time_stamp; /* The Timestamp field shall contain the RTP Timestamp as
                               specified in SMPTE ST 2110-10, 90K sample */
-  double tsc_time_cursor;  /* in ns, tsc time cursor for packet pacing */
-  double ptp_time_cursor;  /* in ns, ptp time cursor for packet pacing */
+  uint64_t tsc_time_cursor;  /* in ns, tsc time cursor for packet pacing */
+  uint64_t ptp_time_cursor;  /* in ns, ptp time cursor for packet pacing */
 };
 
 enum st20_packet_type {
