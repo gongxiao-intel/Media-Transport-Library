@@ -1,0 +1,257 @@
+From fc86246c1283820cd21494a50c96816560f1dfc4 Mon Sep 17 00:00:00 2001
+From: gongxiao-intel <xiaoyan.gong@intel.com>
+Date: Tue, 29 Nov 2022 14:50:36 +0000
+Subject: [PATCH 13/13] igc: fix packets not honor launchtime at begin of
+ cycle.
+
+---
+ drivers/net/igc/base/igc_regs.h |  8 ++++
+ drivers/net/igc/igc_ethdev.c    | 85 +++++++++++++++++----------------
+ drivers/net/igc/igc_ethdev.h    |  3 ++
+ drivers/net/igc/igc_txrx.c      | 38 +++++++++++----
+ 4 files changed, 85 insertions(+), 49 deletions(-)
+
+diff --git a/drivers/net/igc/base/igc_regs.h b/drivers/net/igc/base/igc_regs.h
+index 012cb6d68d..787b6bd216 100644
+--- a/drivers/net/igc/base/igc_regs.h
++++ b/drivers/net/igc/base/igc_regs.h
+@@ -732,4 +732,12 @@
+ #define IGC_STQT(_n)           (0x3324 + 0x4 * (_n))
+ #define IGC_ENDQT(_n)          (0x3334 + 0x4 * (_n))
+ 
++#define IGC_TXQCTL_QAV_SEL_MASK           0x000000C0
++#define IGC_TXQCTL_QUEUE_MODE_LAUNCHT     0x00000001
++#define IGC_TQAVCC(_n)               (0x3004 + ((_n) * 0x40))
++#define IGC_TQAVHC(_n)               (0x300C + ((_n) * 0x40))
++#define IGC_GTXOFFSET                0x3310
++#define IGC_TXPBSIZE_TSN  0x04145145
++#define IGC_ADVTXD_TSN_CNTX_FIRST 0x00000080
++
+ #endif
+diff --git a/drivers/net/igc/igc_ethdev.c b/drivers/net/igc/igc_ethdev.c
+index 4e798ff48d..8508670474 100644
+--- a/drivers/net/igc/igc_ethdev.c
++++ b/drivers/net/igc/igc_ethdev.c
+@@ -950,10 +950,10 @@ eth_igc_start(struct rte_eth_dev *dev)
+ 	uint32_t *speeds;
+ 	int ret;
+ 	uint32_t txqctl = 0;
++  uint32_t tqavcc = 0;
+ 	uint32_t sec, nsec, baset_l, baset_h, tqavctrl;
+-	uint32_t cycle_time;
+-	int64_t n, systime, base_time;
+-	struct timespec system_time;
++	uint64_t n, systime;
++	struct timespec systime_ts;
+ 
+ 	PMD_INIT_FUNC_TRACE();
+ 
+@@ -982,56 +982,61 @@ eth_igc_start(struct rte_eth_dev *dev)
+ 	adapter->stopped = 0;
+ 
+ 	if (igc_timestamp_dynflag > 0) {
+-		cycle_time = NSEC_PER_SEC;
+-		base_time = 0;
+-
+-		IGC_WRITE_REG(hw, IGC_TSSDP, 0);
+-		IGC_WRITE_REG(hw, IGC_TSIM, 0x1);
+-		IGC_WRITE_REG(hw, IGC_IMS, 1<<19);
++		adapter->cycle_time = NSEC_PER_SEC;
++    adapter->base_time = 0;
+ 
+ 		IGC_WRITE_REG(hw, IGC_TSAUXC, 0);
+ 		IGC_WRITE_REG(hw, IGC_I350_DTXMXPKTSZ, 0x19);
+-		IGC_WRITE_REG(hw, IGC_TXPBS, 0x04145145);
+-
+-		tqavctrl = IGC_READ_REG(hw, IGC_TQAVCTRL);
+-		tqavctrl |= 0x1 | 0x8;
+-		IGC_WRITE_REG(hw, IGC_TQAVCTRL, tqavctrl);
+-
+-		IGC_WRITE_REG(hw, IGC_QBVCYCLET_S, cycle_time);
+-		IGC_WRITE_REG(hw, IGC_QBVCYCLET, cycle_time);
++		IGC_WRITE_REG(hw, IGC_TXPBS, IGC_TXPBSIZE_TSN);
++    IGC_WRITE_REG(hw, IGC_GTXOFFSET, 1500);
+ 
+-		IGC_WRITE_REG(hw, IGC_STQT(0), 0);
+-		IGC_WRITE_REG(hw, IGC_ENDQT(0), NSEC_PER_SEC);
++		IGC_WRITE_REG(hw, IGC_QBVCYCLET_S, adapter->cycle_time);
++		IGC_WRITE_REG(hw, IGC_QBVCYCLET, adapter->cycle_time);
+ 
+-		IGC_WRITE_REG(hw, IGC_STQT(1), 0);
+-		IGC_WRITE_REG(hw, IGC_ENDQT(1), NSEC_PER_SEC);
+-
+-		IGC_WRITE_REG(hw, IGC_STQT(2), 0);
+-		IGC_WRITE_REG(hw, IGC_ENDQT(2), NSEC_PER_SEC);
+-
+-		IGC_WRITE_REG(hw, IGC_STQT(3), 0);
+-		IGC_WRITE_REG(hw, IGC_ENDQT(3), NSEC_PER_SEC);
+-
+-		txqctl |= 0x1;
+-		IGC_WRITE_REG(hw, IGC_TXQCTL(0), txqctl);
+-
+-		clock_gettime(CLOCK_REALTIME, &system_time);
+-		IGC_WRITE_REG(hw, IGC_SYSTIML, system_time.tv_nsec);
+-		IGC_WRITE_REG(hw, IGC_SYSTIMH, system_time.tv_sec);
++		clock_gettime(CLOCK_REALTIME, &systime_ts);
++		IGC_WRITE_REG(hw, IGC_SYSTIML, systime_ts.tv_nsec);
++		IGC_WRITE_REG(hw, IGC_SYSTIMH, systime_ts.tv_sec);
+ 
+ 		nsec = IGC_READ_REG(hw, IGC_SYSTIML);
+ 		sec = IGC_READ_REG(hw, IGC_SYSTIMH);
+-		systime = (int64_t)sec * NSEC_PER_SEC + (int64_t)nsec;
++		systime = sec * NSEC_PER_SEC + nsec;
+ 
+-		if (systime > base_time) {
+-			n = (systime - base_time) / cycle_time;
+-			base_time = base_time + (n + 1) * cycle_time;
++		if (systime > adapter->base_time) {
++			n = (systime - adapter->base_time) / adapter->cycle_time;
++			adapter->base_time = adapter->base_time + (n + 1) * adapter->cycle_time;
+ 		}
+ 
+-		baset_h = base_time / NSEC_PER_SEC;
+-		baset_l = base_time % NSEC_PER_SEC;
++    baset_h = adapter->base_time / NSEC_PER_SEC;
++		baset_l = adapter->base_time % NSEC_PER_SEC;
+ 		IGC_WRITE_REG(hw, IGC_BASET_H, baset_h);
+ 		IGC_WRITE_REG(hw, IGC_BASET_L, baset_l);
++    
++    for(uint8_t i = 0; i < IGC_QUEUE_PAIRS_NUM; i ++) {
++      txqctl = 0;
++      switch(i) {
++        case 0:
++          txqctl |= IGC_TXQCTL_QUEUE_MODE_LAUNCHT;
++        default:
++          break;
++      }
++
++      IGC_WRITE_REG(hw, IGC_STQT(i), 0);
++      IGC_WRITE_REG(hw, IGC_ENDQT(i), adapter->cycle_time);
++      
++			tqavcc = IGC_READ_REG(hw, IGC_TQAVCC(i));
++			tqavcc &= ~(IGC_TQAVCC_IDLE_SLOPE |
++				    IGC_TQAVCC_KEEP_CREDITS);
++			IGC_WRITE_REG(hw, IGC_TQAVCC(i), tqavcc);
++
++			IGC_WRITE_REG(hw, IGC_TQAVHC(i), 0);
++      
++      txqctl &= ~(IGC_TXQCTL_QAV_SEL_MASK);
++      IGC_WRITE_REG(hw, IGC_TXQCTL(i), txqctl);
++    }
++    
++		tqavctrl = IGC_READ_REG(hw, IGC_TQAVCTRL);
++		tqavctrl |= 0x1 | 0x8;
++		IGC_WRITE_REG(hw, IGC_TQAVCTRL, tqavctrl);
+ 	}
+ 
+ 	/* check and configure queue intr-vector mapping */
+diff --git a/drivers/net/igc/igc_ethdev.h b/drivers/net/igc/igc_ethdev.h
+index 56979409f8..9ef090b62f 100644
+--- a/drivers/net/igc/igc_ethdev.h
++++ b/drivers/net/igc/igc_ethdev.h
+@@ -241,6 +241,9 @@ struct igc_adapter {
+ 	struct igc_syn_filter syn_filter;
+ 	struct igc_rss_filter rss_filter;
+ 	struct igc_flow_list flow_list;
++  uint64_t base_time;
++  uint32_t cycle_time;
++  uint64_t last_ff_cycle;
+ };
+ 
+ #define IGC_DEV_PRIVATE(_dev)	((_dev)->data->dev_private)
+diff --git a/drivers/net/igc/igc_txrx.c b/drivers/net/igc/igc_txrx.c
+index 811fd49ac4..40f621ddad 100644
+--- a/drivers/net/igc/igc_txrx.c
++++ b/drivers/net/igc/igc_txrx.c
+@@ -94,8 +94,6 @@
+ 
+ #define IGC_TX_OFFLOAD_NOTSUP_MASK (RTE_MBUF_F_TX_OFFLOAD_MASK ^ IGC_TX_OFFLOAD_MASK)
+ 
+-#define NSEC_PER_SEC	1000000000
+-
+ #define IGC_TS_HDR_LEN 16
+ #if 0
+ /**
+@@ -216,6 +214,7 @@ struct igc_tx_queue {
+ 	uint64_t	       offloads; /**< offloads of RTE_ETH_TX_OFFLOAD_* */
+ 	uint32_t	       start_time;
+ 	uint32_t	       end_time;
++  struct rte_eth_dev *dev;
+ };
+ 
+ static inline uint64_t
+@@ -1511,11 +1510,28 @@ what_advctx_update(struct igc_tx_queue *txq, uint64_t flags,
+ 	return IGC_CTX_NUM;
+ }
+ 
+-static __le32 igc_tx_launchtime(uint64_t txtime)
++static __le32 igc_tx_launchtime(struct igc_tx_queue *txq, uint64_t txtime, bool *first_flag)
+ {
+ 	uint64_t base_time = 0;
+ 	uint64_t cycle_time = NSEC_PER_SEC;
+ 	uint32_t launchtime;
++  struct timespec now_ts;
++  uint64_t now, n, baset_est, end_of_cycle;;
++  
++  struct igc_adapter *adapter = IGC_DEV_PRIVATE(txq->dev);
++  
++  clock_gettime(CLOCK_REALTIME, &now_ts);
++  now = now_ts.tv_sec * NSEC_PER_SEC + now_ts.tv_nsec;
++  n = (now - adapter->base_time) / adapter->cycle_time;
++  baset_est = adapter->base_time + cycle_time * n;
++  end_of_cycle = baset_est + adapter->cycle_time;
++  
++  if (txtime >= end_of_cycle) {
++    if (baset_est != adapter->last_ff_cycle) {
++			*first_flag = true;
++			adapter->last_ff_cycle = baset_est;      
++    }
++  }
+ 
+ 	launchtime = (txtime - base_time) % cycle_time;
+ 
+@@ -1537,6 +1553,7 @@ igc_set_xmit_ctx(struct igc_tx_queue *txq,
+ 	uint32_t ctx_curr;
+ 	uint32_t vlan_macip_lens;
+ 	union igc_tx_offload tx_offload_mask;
++  bool first_flag = false;
+ 
+ 	/* Use the previous context */
+ 	txq->ctx_curr ^= 1;
+@@ -1610,17 +1627,19 @@ igc_set_xmit_ctx(struct igc_tx_queue *txq,
+ 		tx_offload_mask.data & tx_offload.data;
+ 	txq->ctx_cache[ctx_curr].tx_offload_mask = tx_offload_mask;
+ #endif
++	if (igc_timestamp_dynflag > 0 && txq->queue_id == 0) {
++		ctx_txd->u.launch_time = igc_tx_launchtime(txq, txtime, &first_flag);
++    type_tucmd_mlhl |= IGC_ADVTXD_DTYP_CTXT | IGC_ADVTXD_DCMD_DEXT;
++    if (first_flag)
++      mss_l4len_idx |= IGC_ADVTXD_TSN_CNTX_FIRST;    
++	} else {
++		ctx_txd->u.launch_time = 0;
++	}
+ 
+ 	ctx_txd->type_tucmd_mlhl = rte_cpu_to_le_32(type_tucmd_mlhl);
+ 	vlan_macip_lens = (uint32_t)tx_offload.data;
+ 	ctx_txd->vlan_macip_lens = rte_cpu_to_le_32(vlan_macip_lens);
+ 	ctx_txd->mss_l4len_idx = rte_cpu_to_le_32(mss_l4len_idx);
+-
+-	if (igc_timestamp_dynflag > 0 && txq->queue_id == 0) {
+-		ctx_txd->u.launch_time = igc_tx_launchtime(txtime);
+-	} else {
+-		ctx_txd->u.launch_time = 0;
+-	}
+ }
+ 
+ static inline uint32_t
+@@ -2088,6 +2107,7 @@ int eth_igc_tx_queue_setup(struct rte_eth_dev *dev, uint16_t queue_idx,
+ 	dev->data->tx_queues[queue_idx] = txq;
+ 	txq->offloads = tx_conf->offloads;
+ 	txq->offloads |= offloads;
++  txq->dev = dev;
+ 
+ 	if (txq->offloads & RTE_ETH_TX_OFFLOAD_SEND_ON_TIMESTAMP) {
+ 		err = rte_mbuf_dyn_tx_timestamp_register(
+-- 
+2.25.1
+

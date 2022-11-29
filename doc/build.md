@@ -39,6 +39,7 @@ git am $dpdk_st_kahawai/patches/dpdk/22.07/0009-ice-fix-ice_interrupt_handler-pa
 git am $dpdk_st_kahawai/patches/dpdk/22.07/0010-igc-fix-can-t-transmit-packet-though-others-queues-a.patch
 git am $dpdk_st_kahawai/patches/dpdk/22.07/0011-igc-fix-dynamic-field-flag-variables-can-t-be-access.patch
 git am $dpdk_st_kahawai/patches/dpdk/22.07/0012-igc-fix-other-queue-packets-launch-time-being-set.patch
+git am $dpdk_st_kahawai/patches/dpdk/22.07/0013-igc-fix-packets-not-honor-launchtime-at-begin-of-cyc.patch
 ```
 
 #### 2.3 Build and install DPDK library
