@@ -297,7 +297,7 @@ int main(int argc, char** argv) {
     }
   }
 
-  if (ctx->runtime_session) {
+  if (!ctx->runtime_session) {
     ret = st_start(ctx->st);
     if (ret < 0) {
       err("%s, start dev fail %d\n", __func__, ret);
@@ -305,6 +305,10 @@ int main(int argc, char** argv) {
       return -EIO;
     }
   }
+ 
+  info("%s, wait for clock sync....\n", __func__);
+  sleep(300);
+  info("%s, clock sync done.\n", __func__);
 
   ret = st_app_tx_video_sessions_init(ctx);
   if (ret < 0) {
@@ -326,7 +330,7 @@ int main(int argc, char** argv) {
     st_app_ctx_free(ctx);
     return -EIO;
   }
-
+ 
   ret = st_app_tx_st22p_sessions_init(ctx);
   if (ret < 0) {
     err("%s, st_app_tx_st22p_sessions_init fail %d\n", __func__, ret);
