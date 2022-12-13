@@ -307,7 +307,7 @@ int main(int argc, char** argv) {
   }
  
   info("%s, wait for clock sync....\n", __func__);
-  sleep(300);
+  sleep(180);
   info("%s, clock sync done.\n", __func__);
 
   ret = st_app_tx_video_sessions_init(ctx);
