@@ -407,19 +407,30 @@ static int video_trs_launch_time_tasklet(struct st_main_impl* impl,
   struct rte_ring* ring = s->ring[s_port];
   int tx = 0;
   unsigned int n;
+  uint64_t i;
   uint64_t target_ptp;
   uint16_t port_id = s->port_id[s_port];
   struct st_interface* inf = st_if(impl, port_id);
+  struct timespec now;
+  clock_gettime(CLOCK_REALTIME, &now);
 
   /* check if any inflight pkts in transmitter */
   if (s->trs_inflight_num[s_port] > 0) {
-    tx = rte_eth_tx_burst(s->port_id[s_port], s->queue_id[s_port],
-                          &s->trs_inflight[s_port][s->trs_inflight_idx[s_port]],
-                          s->trs_inflight_num[s_port]);
+    for(i = 0; i < s->trs_inflight_num[s_port]; i++) {
+      target_ptp = st_tx_mbuf_get_ptp(s->trs_inflight[s_port][s->trs_inflight_idx[s_port]]) + 5000;
+      if (target_ptp < 16*s->pacing.trs+(now.tv_sec*1000000000+now.tv_nsec)) {
+        tx += rte_eth_tx_burst(s->port_id[s_port], s->queue_id[s_port],
+                              &s->trs_inflight[s_port][s->trs_inflight_idx[s_port]],
+                              1);
+        s->trs_inflight_idx[s_port]++;
+      }
+      else {
+        break;
+      }
+    }
     s->trs_inflight_num[s_port] -= tx;
-    s->trs_inflight_idx[s_port] += tx;
     s->stat_pkts_burst += tx;
-    if (tx > 0) {
+    if (s->trs_inflight_num[s_port] > 0) {
       return ST_TASKLET_HAS_PENDING;
     } else {
       s->stat_trs_ret_code[s_port] = -STI_TSCTRS_BURST_INFILGHT_FAIL;
@@ -467,12 +478,13 @@ static int video_trs_launch_time_tasklet(struct st_main_impl* impl,
   /* Put tx timestamp into transmit descriptor */
   pkts[0]->ol_flags |= inf->tx_launch_time_flag;
   *RTE_MBUF_DYNFIELD(pkts[0], inf->tx_dynfield_offset, uint64_t *) = target_ptp;    
-
-  tx = rte_eth_tx_burst(s->port_id[s_port], s->queue_id[s_port], &pkts[0], valid_bulk);
+    
+  if (target_ptp < 16*s->pacing.trs+(now.tv_sec*1000000000+now.tv_nsec)) {
+    tx = rte_eth_tx_burst(s->port_id[s_port], s->queue_id[s_port], &pkts[0], valid_bulk);
+  }
   s->stat_pkts_burst += tx;
   
   if (tx < valid_bulk) {
-    unsigned int i;
     unsigned int remaining = valid_bulk - tx;
 
     s->trs_inflight_num[s_port] = remaining;
