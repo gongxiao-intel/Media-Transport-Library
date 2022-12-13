@@ -1,8 +1,8 @@
-From 33333eadf28cef7f6f7d3fa6aa315567f25e2cc9 Mon Sep 17 00:00:00 2001
+From d6d486a372b02e1e9948f71180f0805781b4a154 Mon Sep 17 00:00:00 2001
 From: gongxiao-intel <xiaoyan.gong@intel.com>
 Date: Tue, 13 Dec 2022 10:55:41 +0000
-Subject: [PATCH 14/14] Remove unecessary system call for retrieving current
- time in launch time caculation
+Subject: [PATCH 14/14] igc: Remove unecessary system call for retrieving
+ current time in launch time caculation
 
 ---
  drivers/net/igc/igc_ethdev.c |  1 +
