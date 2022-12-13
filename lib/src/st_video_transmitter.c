@@ -463,7 +463,7 @@ static int video_trs_launch_time_tasklet(struct st_main_impl* impl,
     s->pri_nic_inflight_cnt = 0;
   }
 
-  target_ptp = st_tx_mbuf_get_ptp(pkts[0]);
+  target_ptp = st_tx_mbuf_get_ptp(pkts[0]) + 5000;
   /* Put tx timestamp into transmit descriptor */
   pkts[0]->ol_flags |= inf->tx_launch_time_flag;
   *RTE_MBUF_DYNFIELD(pkts[0], inf->tx_dynfield_offset, uint64_t *) = target_ptp;    
