@@ -413,6 +413,13 @@ static int video_trs_launch_time_tasklet(struct st_main_impl* impl,
   struct st_interface* inf = st_if(impl, port_id);
   struct timespec now;
   clock_gettime(CLOCK_REALTIME, &now);
+  
+  if (s->stat_prev_trans_time) {
+    if (now.tv_sec*1000000000+now.tv_nsec - s->stat_prev_trans_time > 1000000) {
+      info("%s, warning: transmit interval too large.\n", __func__);    
+    }
+  }
+  s->stat_prev_trans_time = now.tv_sec*1000000000+now.tv_nsec;
 
   /* check if any inflight pkts in transmitter */
   if (s->trs_inflight_num[s_port] > 0) {
