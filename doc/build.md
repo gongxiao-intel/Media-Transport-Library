@@ -41,6 +41,8 @@ git am $dpdk_st_kahawai/patches/dpdk/22.07/0011-igc-fix-dynamic-field-flag-varia
 git am $dpdk_st_kahawai/patches/dpdk/22.07/0012-igc-fix-other-queue-packets-launch-time-being-set.patch
 git am $dpdk_st_kahawai/patches/dpdk/22.07/0013-igc-fix-packets-not-honor-launchtime-at-begin-of-cyc.patch
 git am $dpdk_st_kahawai/patches/dpdk/22.07/0014-igc-Remove-unecessary-system-call-for-retrieving-cur.patch
+git am $dpdk_st_kahawai/patches/dpdk/22.07/0015-igc-Restore-nic-to-BE-transmission-mode.patch
+git am $dpdk_st_kahawai/patches/dpdk/22.07/0016-igc-Fix-no-launch-time-update-without-creating-a-new.patch
 ```
 
 #### 2.3 Build and install DPDK library

@@ -1,0 +1,61 @@
+From 72087a5a11a220a5ec350f8418968a9552490a36 Mon Sep 17 00:00:00 2001
+From: gongxiao-intel <xiaoyan.gong@intel.com>
+Date: Wed, 14 Dec 2022 16:40:29 +0000
+Subject: [PATCH 16/16] igc - Fix no launch time update without creating a new
+ Tx context
+
+---
+ drivers/net/igc/igc_txrx.c | 24 ++++++++++++------------
+ 1 file changed, 12 insertions(+), 12 deletions(-)
+
+diff --git a/drivers/net/igc/igc_txrx.c b/drivers/net/igc/igc_txrx.c
+index 8af1a95d0c..b7ebae3acc 100644
+--- a/drivers/net/igc/igc_txrx.c
++++ b/drivers/net/igc/igc_txrx.c
+@@ -1815,11 +1815,11 @@ igc_xmit_pkts(void *tx_queue, struct rte_mbuf **tx_pkts, uint16_t nb_pkts)
+ 
+ 		if (tx_ol_req) {
+ 			/* Setup TX Advanced context descriptor if required */
++      volatile struct igc_adv_tx_context_desc *
++        ctx_txd = (volatile struct
++        igc_adv_tx_context_desc *)&txr[tx_id];
++      
+ 			if (new_ctx) {
+-				volatile struct igc_adv_tx_context_desc *
+-					ctx_txd = (volatile struct
+-					igc_adv_tx_context_desc *)&txr[tx_id];
+-
+ 				txn = &sw_ring[txe->next_id];
+ 				RTE_MBUF_PREFETCH_TO_FREE(txn->mbuf);
+ 
+@@ -1828,19 +1828,19 @@ igc_xmit_pkts(void *tx_queue, struct rte_mbuf **tx_pkts, uint16_t nb_pkts)
+ 					txe->mbuf = NULL;
+ 				}
+ 
+-				if (igc_timestamp_dynflag > 0)
+-					ts = *RTE_MBUF_DYNFIELD(tx_pkt,
+-						igc_timestamp_dynfield_offset,
+-						uint64_t *);
+-
+-				igc_set_xmit_ctx(txq, ctx_txd, tx_ol_req,
+-						tx_offload, ts);
+-
+ 				txe->last_id = tx_last;
+ 				tx_id = txe->next_id;
+ 				txe = txn;
+ 			}
+ 
++      if (igc_timestamp_dynflag > 0)
++        ts = *RTE_MBUF_DYNFIELD(tx_pkt,
++          igc_timestamp_dynfield_offset,
++          uint64_t *);
++
++      igc_set_xmit_ctx(txq, ctx_txd, tx_ol_req,
++          tx_offload, ts);
++
+ 			/* Setup the TX Advanced Data Descriptor */
+ 			cmd_type_len |=
+ 				tx_desc_vlan_flags_to_cmdtype(tx_ol_req);
+-- 
+2.25.1
+

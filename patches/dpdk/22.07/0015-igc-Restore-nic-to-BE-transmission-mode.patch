@@ -1,0 +1,76 @@
+From aaa65d3abbadb534ab7922de3f8d72ced96bd4ca Mon Sep 17 00:00:00 2001
+From: gongxiao-intel <xiaoyan.gong@intel.com>
+Date: Wed, 14 Dec 2022 16:38:42 +0000
+Subject: [PATCH 15/16] igc - Restore nic to BE transmission mode
+
+---
+ drivers/net/igc/base/igc_regs.h |  4 +++-
+ drivers/net/igc/igc_ethdev.c    | 25 +++++++++++++++++++++++++
+ 2 files changed, 28 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/net/igc/base/igc_regs.h b/drivers/net/igc/base/igc_regs.h
+index 787b6bd216..a331f8d5e1 100644
+--- a/drivers/net/igc/base/igc_regs.h
++++ b/drivers/net/igc/base/igc_regs.h
+@@ -739,5 +739,7 @@
+ #define IGC_GTXOFFSET                0x3310
+ #define IGC_TXPBSIZE_TSN  0x04145145
+ #define IGC_ADVTXD_TSN_CNTX_FIRST 0x00000080
+-
++#define IGC_TXQCTL_DATA_FETCH_TIM     0xC3508000
++#define I225_TXPBSIZE_DEFAULT     0x04000014 /* TXPBSIZE default */
++#define IGC_DTXMXPKTSZ_DEFAULT    0x98 /* 9728-byte Jumbo frames */
+ #endif
+diff --git a/drivers/net/igc/igc_ethdev.c b/drivers/net/igc/igc_ethdev.c
+index 4273ca20e4..b83673afde 100644
+--- a/drivers/net/igc/igc_ethdev.c
++++ b/drivers/net/igc/igc_ethdev.c
+@@ -645,6 +645,7 @@ eth_igc_stop(struct rte_eth_dev *dev)
+ 	struct rte_pci_device *pci_dev = RTE_ETH_DEV_TO_PCI(dev);
+ 	struct rte_intr_handle *intr_handle = pci_dev->intr_handle;
+ 	struct rte_eth_link link;
++  uint32_t tqavctrl;
+ 
+ 	dev->data->dev_started = 0;
+ 	adapter->stopped = 1;
+@@ -665,6 +666,29 @@ eth_igc_stop(struct rte_eth_dev *dev)
+ 
+ 	/* disable intr eventfd mapping */
+ 	rte_intr_disable(intr_handle);
++  
++	if (igc_timestamp_dynflag > 0) {
++		adapter->cycle_time = NSEC_PER_SEC;
++    adapter->base_time = 0;
++
++		IGC_WRITE_REG(hw, IGC_I350_DTXMXPKTSZ, IGC_DTXMXPKTSZ_DEFAULT);
++		IGC_WRITE_REG(hw, IGC_TXPBS, I225_TXPBSIZE_DEFAULT);
++
++		IGC_WRITE_REG(hw, IGC_QBVCYCLET_S, 0);
++		IGC_WRITE_REG(hw, IGC_QBVCYCLET, adapter->cycle_time);
++
++    adapter->last_frst_time = adapter->base_time;
++    
++    for(uint8_t i = 0; i < IGC_QUEUE_PAIRS_NUM; i ++) {
++      IGC_WRITE_REG(hw, IGC_STQT(i), 0);
++      IGC_WRITE_REG(hw, IGC_ENDQT(i), adapter->cycle_time);     
++      IGC_WRITE_REG(hw, IGC_TXQCTL(i), 0);
++    }
++    
++		tqavctrl = IGC_READ_REG(hw, IGC_TQAVCTRL);
++		tqavctrl &= ~(0x1 | 0x8);
++		IGC_WRITE_REG(hw, IGC_TQAVCTRL, tqavctrl);
++	}  
+ 
+ 	igc_reset_hw(hw);
+ 
+@@ -1017,6 +1041,7 @@ eth_igc_start(struct rte_eth_dev *dev)
+       switch(i) {
+         case 0:
+           txqctl |= IGC_TXQCTL_QUEUE_MODE_LAUNCHT;
++          break;
+         default:
+           break;
+       }
+-- 
+2.25.1
+
