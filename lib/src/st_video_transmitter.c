@@ -419,17 +419,22 @@ static int video_trs_launch_time_tasklet(struct st_main_impl* impl,
     for(i = 0; i < s->trs_inflight_num[s_port]; i++) {
       target_ptp = st_tx_mbuf_get_ptp(s->trs_inflight[s_port][s->trs_inflight_idx[s_port]]) + 5000;
       if (target_ptp < 16*s->pacing.trs+(now.tv_sec*1000000000+now.tv_nsec)) {
-        tx += rte_eth_tx_burst(s->port_id[s_port], s->queue_id[s_port],
-                              &s->trs_inflight[s_port][s->trs_inflight_idx[s_port]],
-                              1);
-        s->trs_inflight_idx[s_port]++;
+        tx = rte_eth_tx_burst(s->port_id[s_port], s->queue_id[s_port],
+                             &s->trs_inflight[s_port][s->trs_inflight_idx[s_port]],
+                             1);
+        if (tx == 1) {
+          s->trs_inflight_idx[s_port]++;
+          s->stat_pkts_burst++;
+          s->trs_inflight_num[s_port]--;
+        }
+        else {
+          break;
+        }
       }
       else {
         break;
       }
     }
-    s->trs_inflight_num[s_port] -= tx;
-    s->stat_pkts_burst += tx;
     if (s->trs_inflight_num[s_port] > 0) {
       return ST_TASKLET_HAS_PENDING;
     } else {
