@@ -418,7 +418,7 @@ static int video_trs_launch_time_tasklet(struct st_main_impl* impl,
   if (s->trs_inflight_num[s_port] > 0) {
     for(i = 0; i < s->trs_inflight_num[s_port]; i++) {
       target_ptp = st_tx_mbuf_get_ptp(s->trs_inflight[s_port][s->trs_inflight_idx[s_port]]) + 5000;
-      if (target_ptp < 16*s->pacing.trs+(now.tv_sec*1000000000+now.tv_nsec)) {
+      if (target_ptp < 150000+(now.tv_sec*1000000000+now.tv_nsec)) {
         tx = rte_eth_tx_burst(s->port_id[s_port], s->queue_id[s_port],
                              &s->trs_inflight[s_port][s->trs_inflight_idx[s_port]],
                              1);
@@ -484,7 +484,7 @@ static int video_trs_launch_time_tasklet(struct st_main_impl* impl,
   pkts[0]->ol_flags |= inf->tx_launch_time_flag;
   *RTE_MBUF_DYNFIELD(pkts[0], inf->tx_dynfield_offset, uint64_t *) = target_ptp;    
     
-  if (target_ptp < 16*s->pacing.trs+(now.tv_sec*1000000000+now.tv_nsec)) {
+  if (target_ptp < 150000+(now.tv_sec*1000000000+now.tv_nsec)) {
     tx = rte_eth_tx_burst(s->port_id[s_port], s->queue_id[s_port], &pkts[0], valid_bulk);
   }
   s->stat_pkts_burst += tx;
