@@ -411,12 +411,14 @@ static int video_trs_launch_time_tasklet(struct st_main_impl* impl,
   uint64_t target_ptp;
   uint16_t port_id = s->port_id[s_port];
   struct st_interface* inf = st_if(impl, port_id);
+  uint8_t is_trans_inter_large;
   struct timespec now;
   clock_gettime(CLOCK_REALTIME, &now);
   
+  is_trans_inter_large = 0;
   if (s->stat_prev_trans_time) {
     if (now.tv_sec*1000000000+now.tv_nsec - s->stat_prev_trans_time > 1000000) {
-      info("%s, warning: transmit interval too large.\n", __func__);    
+      is_trans_inter_large = 1;
     }
   }
   s->stat_prev_trans_time = now.tv_sec*1000000000+now.tv_nsec;
@@ -433,6 +435,18 @@ static int video_trs_launch_time_tasklet(struct st_main_impl* impl,
           s->trs_inflight_idx[s_port]++;
           s->stat_pkts_burst++;
           s->trs_inflight_num[s_port]--;
+          
+          if (is_trans_inter_large) {
+            uint16_t rtp_seq;
+            uint32_t rtp_ts;
+            struct st_rfc4175_video_hdr* pkg_hdr = rte_pktmbuf_mtod(s->trs_inflight[s_port][s->trs_inflight_idx[s_port]], 
+                                                      struct st_rfc4175_video_hdr*);
+            struct st20_rfc4175_rtp_hdr* rtp_hdr = &pkg_hdr->rtp;
+            rtp_seq = rtp_hdr->base.seq_number;
+            rtp_ts = rtp_hdr->base.tmstamp;
+            info("%s, warning: process interval too large when transmit packet (ts=%u seq=%u).\n", 
+                __func__, rtp_ts, rtp_seq);
+          }
         }
         else {
           break;
@@ -493,6 +507,16 @@ static int video_trs_launch_time_tasklet(struct st_main_impl* impl,
     
   if (target_ptp < 150000+(now.tv_sec*1000000000+now.tv_nsec)) {
     tx = rte_eth_tx_burst(s->port_id[s_port], s->queue_id[s_port], &pkts[0], valid_bulk);
+    if (is_trans_inter_large) {
+      uint16_t rtp_seq;
+      uint32_t rtp_ts;
+      struct st_rfc4175_video_hdr* pkg_hdr = rte_pktmbuf_mtod(pkts[0], struct st_rfc4175_video_hdr*);
+      struct st20_rfc4175_rtp_hdr* rtp_hdr = &pkg_hdr->rtp;
+      rtp_seq = rtp_hdr->base.seq_number;
+      rtp_ts = rtp_hdr->base.tmstamp;
+      info("%s, warning: process interval too large when transmit packet (ts=%u seq=%u).\n", 
+          __func__, rtp_ts, rtp_seq);
+    }    
   }
   s->stat_pkts_burst += tx;
   
