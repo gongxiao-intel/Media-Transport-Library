@@ -400,6 +400,56 @@ static int video_trs_tsc_tasklet(struct st_main_impl* impl,
   return ST_TASKLET_HAS_PENDING;
 }
 
+#define STAT_UPDATE_BURST_INTER(S,T) \
+do {\
+    struct st_tx_video_session_impl *_S = S;\
+    uint64_t _BURST_INTERVAL;\
+    if(_S->stat_prev_burst_time) {\
+      _BURST_INTERVAL = (T) - _S->stat_prev_burst_time;\
+      if (_S->stat_min_burst_inter==0 || _S->stat_min_burst_inter>_BURST_INTERVAL) {\
+        _S->stat_min_burst_inter = _BURST_INTERVAL;\
+      }\
+      if (_S->stat_max_burst_inter==0 || _S->stat_max_burst_inter<_BURST_INTERVAL) {\
+        _S->stat_max_burst_inter = _BURST_INTERVAL;\
+      }\
+      _S->stat_avg_burst_inter=(_S->stat_avg_burst_inter*_S->stat_burst_cnt+_BURST_INTERVAL)/(_S->stat_burst_cnt+1);\
+      _S->stat_burst_cnt++;\
+    }\
+    _S->stat_prev_burst_time = (T);\
+} while(0)
+
+#define STAT_UPDATE_DEALINE_DELTA(S,LAUNCH_T,NOW) \
+do {\
+    struct st_tx_video_session_impl *_S = S;\
+    int64_t _DEALINE_DELTA = (LAUNCH_T) - (NOW);\
+    if (_S->stat_deadline_delta_cnt==0 || _S->stat_min_deadline_delta>_DEALINE_DELTA) {\
+      _S->stat_min_deadline_delta = _DEALINE_DELTA;\
+    }\
+    if (_S->stat_deadline_delta_cnt==0 || _S->stat_max_deadline_delta<_DEALINE_DELTA) {\
+      _S->stat_max_deadline_delta = _DEALINE_DELTA;\
+    }\
+    _S->stat_avg_deadline_delta=(_S->stat_avg_deadline_delta*_S->stat_deadline_delta_cnt+_DEALINE_DELTA)/(_S->stat_deadline_delta_cnt+1);\
+    _S->stat_deadline_delta_cnt++;\
+} while(0)
+
+#define STAT_UPDATE_TX_TASK_INTER(S,T) \
+do {\
+    struct st_tx_video_session_impl *_S = S;\
+    uint64_t _TX_TASK_INTERVAL;\
+    if(_S->stat_prev_tx_task_time) {\
+      _TX_TASK_INTERVAL = (T) - _S->stat_prev_tx_task_time;\
+      if (_S->stat_min_tx_task_inter==0 || _S->stat_min_tx_task_inter>_TX_TASK_INTERVAL) {\
+        _S->stat_min_tx_task_inter = _TX_TASK_INTERVAL;\
+      }\
+      if (_S->stat_max_tx_task_inter==0 || _S->stat_max_tx_task_inter<_TX_TASK_INTERVAL) {\
+        _S->stat_max_tx_task_inter = _TX_TASK_INTERVAL;\
+      }\
+      _S->stat_avg_tx_task_inter=(_S->stat_avg_tx_task_inter*_S->stat_tx_task_cnt+_TX_TASK_INTERVAL)/(_S->stat_tx_task_cnt+1);\
+      _S->stat_tx_task_cnt++;\
+    }\
+    _S->stat_prev_tx_task_time = (T);\
+} while(0)
+
 static int video_trs_launch_time_tasklet(struct st_main_impl* impl,
                                  struct st_tx_video_session_impl* s,
                                  enum st_session_port s_port) {
@@ -411,28 +461,10 @@ static int video_trs_launch_time_tasklet(struct st_main_impl* impl,
   uint64_t target_ptp;
   uint16_t port_id = s->port_id[s_port];
   struct st_interface* inf = st_if(impl, port_id);
-  uint8_t is_tx_task_inter_large;
   struct timespec now;
   clock_gettime(CLOCK_REALTIME, &now);
   
-  is_tx_task_inter_large = 0;
-  if (s->stat_prev_tx_task_time) {
-    uint64_t tx_task_inter = now.tv_sec*1000000000+now.tv_nsec - s->stat_prev_tx_task_time;
-    if (tx_task_inter > 1000000) {
-      is_tx_task_inter_large = 1;
-    }
-
-    
-    if (s->stat_min_tx_task_inter == 0 || s->stat_min_tx_task_inter > tx_task_inter) 
-      s->stat_min_tx_task_inter = tx_task_inter;
-
-    if (s->stat_max_tx_task_inter == 0 || s->stat_max_tx_task_inter < tx_task_inter) 
-      s->stat_max_tx_task_inter = tx_task_inter;
-
-    s->stat_avg_tx_task_inter = (s->stat_avg_tx_task_inter*s->stat_tx_task_cnt+tx_task_inter)/(s->stat_tx_task_cnt+1);
-    s->stat_tx_task_cnt++;
-  }
-  s->stat_prev_tx_task_time = now.tv_sec*1000000000+now.tv_nsec;
+  STAT_UPDATE_TX_TASK_INTER(s, now.tv_sec*1000000000+now.tv_nsec);
 
   /* check if any inflight pkts in transmitter */
   if (s->trs_inflight_num[s_port] > 0) {
@@ -447,17 +479,8 @@ static int video_trs_launch_time_tasklet(struct st_main_impl* impl,
           s->stat_pkts_burst++;
           s->trs_inflight_num[s_port]--;
           
-          if (is_tx_task_inter_large) {
-            uint16_t rtp_seq;
-            uint32_t rtp_ts;
-            struct st_rfc4175_video_hdr* pkg_hdr = rte_pktmbuf_mtod(s->trs_inflight[s_port][s->trs_inflight_idx[s_port]], 
-                                                      struct st_rfc4175_video_hdr*);
-            struct st20_rfc4175_rtp_hdr* rtp_hdr = &pkg_hdr->rtp;
-            rtp_seq = rtp_hdr->base.seq_number;
-            rtp_ts = rtp_hdr->base.tmstamp;
-            info("%s, warning: process interval too large when transmit packet (ts=%u seq=%u).\n", 
-                __func__, rtp_ts, rtp_seq);
-          }
+          STAT_UPDATE_BURST_INTER(s, now.tv_sec*1000000000+now.tv_nsec);
+          STAT_UPDATE_DEALINE_DELTA(s, target_ptp, now.tv_sec*1000000000+now.tv_nsec);
         }
         else {
           break;
@@ -518,16 +541,6 @@ static int video_trs_launch_time_tasklet(struct st_main_impl* impl,
     
   if (target_ptp < 150000+(now.tv_sec*1000000000+now.tv_nsec)) {
     tx = rte_eth_tx_burst(s->port_id[s_port], s->queue_id[s_port], &pkts[0], valid_bulk);
-    if (is_tx_task_inter_large) {
-      uint16_t rtp_seq;
-      uint32_t rtp_ts;
-      struct st_rfc4175_video_hdr* pkg_hdr = rte_pktmbuf_mtod(pkts[0], struct st_rfc4175_video_hdr*);
-      struct st20_rfc4175_rtp_hdr* rtp_hdr = &pkg_hdr->rtp;
-      rtp_seq = rtp_hdr->base.seq_number;
-      rtp_ts = rtp_hdr->base.tmstamp;
-      info("%s, warning: process interval too large when transmit packet (ts=%u seq=%u).\n", 
-          __func__, rtp_ts, rtp_seq);
-    }    
   }
   s->stat_pkts_burst += tx;
   
@@ -538,6 +551,10 @@ static int video_trs_launch_time_tasklet(struct st_main_impl* impl,
     s->trs_inflight_idx[s_port] = 0;
     s->trs_inflight_cnt[s_port]++;
     for (i = 0; i < remaining; i++) s->trs_inflight[s_port][i] = pkts[tx + i];
+  }
+  else {
+    STAT_UPDATE_BURST_INTER(s, now.tv_sec*1000000000+now.tv_nsec);
+    STAT_UPDATE_DEALINE_DELTA(s, target_ptp, now.tv_sec*1000000000+now.tv_nsec);
   }
 
   return ST_TASKLET_HAS_PENDING;
