@@ -2266,6 +2266,10 @@ static void tv_stat(struct st_tx_video_sessions_mgr* mgr,
   s->stat_pkts_dummy = 0;
   s->stat_pkts_burst_dummy = 0;
 
+  info(
+      "TX_VIDEO_SESSION(%d,%d:%s): task inter avg: %lu, min: %lu, max: %lu\n",
+      m_idx, idx, s->ops_name, s->stat_avg_tx_task_inter, s->stat_min_tx_task_inter, s->stat_max_tx_task_inter);
+
   if (s->stat_epoch_troffset_mismatch) {
     info("TX_VIDEO_SESSION(%d,%d): mismatch epoch troffset %u\n", m_idx, idx,
          s->stat_epoch_troffset_mismatch);

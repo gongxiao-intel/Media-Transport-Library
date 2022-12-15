@@ -630,7 +630,11 @@ struct st_tx_video_session_impl {
   bool stat_user_busy_first;
   uint32_t stat_user_busy;       /* get_next_frame or dequeue_bulk from rtp ring fail */
   uint32_t stat_lines_not_ready; /* query app lines not ready */
-  uint64_t stat_prev_trans_time;
+  uint64_t stat_prev_tx_task_time;
+  uint64_t stat_max_tx_task_inter;
+  uint64_t stat_min_tx_task_inter;
+  uint64_t stat_avg_tx_task_inter;
+  uint64_t stat_tx_task_cnt;
 };
 
 struct st_tx_video_sessions_mgr {
