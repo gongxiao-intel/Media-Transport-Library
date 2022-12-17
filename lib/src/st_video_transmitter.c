@@ -418,10 +418,12 @@ do {\
     _S->stat_prev_burst_time = (T);\
 } while(0)
 
-#define STAT_UPDATE_DEALINE_DELTA(S,LAUNCH_T,NOW) \
+#define STAT_UPDATE_DEALINE_DELTA(S,LAUNCH_T) \
 do {\
+    struct timespec _NOW;\
+    clock_gettime(CLOCK_REALTIME, &_NOW);\
     struct st_tx_video_session_impl *_S = S;\
-    int64_t _DEALINE_DELTA = (LAUNCH_T) - (NOW);\
+    int64_t _DEALINE_DELTA = (LAUNCH_T) - (_NOW.tv_sec*1000000000+_NOW.tv_nsec);\
     if (_S->stat_deadline_delta_cnt==0 || _S->stat_min_deadline_delta>_DEALINE_DELTA) {\
       _S->stat_min_deadline_delta = _DEALINE_DELTA;\
     }\
@@ -450,6 +452,20 @@ do {\
     _S->stat_prev_tx_task_time = (T);\
 } while(0)
 
+#define STAT_UPDATE_BURST_CALL_LAT(S,T1,T2) \
+do {\
+    struct st_tx_video_session_impl *_S = S;\
+    uint64_t _BURST_CALL_LATENCY = (T2.tv_sec*1000000000+T2.tv_nsec) - (T1.tv_sec*1000000000+T1.tv_nsec);\
+    if (_S->stat_min_burst_call_lat==0 || _S->stat_min_burst_call_lat>_BURST_CALL_LATENCY) {\
+      _S->stat_min_burst_call_lat = _BURST_CALL_LATENCY;\
+    }\
+    if (_S->stat_max_burst_call_lat==0 || _S->stat_max_burst_call_lat<_BURST_CALL_LATENCY) {\
+      _S->stat_max_burst_call_lat = _BURST_CALL_LATENCY;\
+    }\
+    _S->stat_avg_burst_call_lat=(_S->stat_avg_burst_call_lat*_S->stat_burst_call_cnt+_BURST_CALL_LATENCY)/(_S->stat_burst_call_cnt+1);\
+    _S->stat_burst_call_cnt++;\
+} while(0)
+
 static int video_trs_launch_time_tasklet(struct st_main_impl* impl,
                                  struct st_tx_video_session_impl* s,
                                  enum st_session_port s_port) {
@@ -461,7 +477,7 @@ static int video_trs_launch_time_tasklet(struct st_main_impl* impl,
   uint64_t target_ptp, earliest_target_ptp;
   uint16_t port_id = s->port_id[s_port];
   struct st_interface* inf = st_if(impl, port_id);
-  struct timespec now;
+  struct timespec now, tp1, tp2;
   clock_gettime(CLOCK_REALTIME, &now);
   
   STAT_UPDATE_TX_TASK_INTER(s, now.tv_sec*1000000000+now.tv_nsec);
@@ -469,9 +485,13 @@ static int video_trs_launch_time_tasklet(struct st_main_impl* impl,
   /* check if any inflight pkts in transmitter */
   if (s->trs_inflight_num[s_port] > 0) {
     earliest_target_ptp = st_tx_mbuf_get_ptp(s->trs_inflight[s_port][s->trs_inflight_idx[s_port]]) + 5000;
+    
+    clock_gettime(CLOCK_REALTIME, &tp1);
     tx = rte_eth_tx_burst(s->port_id[s_port], s->queue_id[s_port],
                           &s->trs_inflight[s_port][s->trs_inflight_idx[s_port]],
                           s->trs_inflight_num[s_port]);
+    clock_gettime(CLOCK_REALTIME, &tp2);
+    STAT_UPDATE_BURST_CALL_LAT(s, tp1, tp2);
     
     s->trs_inflight_num[s_port] -= tx;
     s->trs_inflight_idx[s_port] += tx;
@@ -479,7 +499,7 @@ static int video_trs_launch_time_tasklet(struct st_main_impl* impl,
     
     if (tx > 0) {
       STAT_UPDATE_BURST_INTER(s, now.tv_sec*1000000000+now.tv_nsec);
-      STAT_UPDATE_DEALINE_DELTA(s, earliest_target_ptp, now.tv_sec*1000000000+now.tv_nsec);
+      STAT_UPDATE_DEALINE_DELTA(s, earliest_target_ptp);
       return ST_TASKLET_HAS_PENDING;
     } else {
       s->stat_trs_ret_code[s_port] = -STI_TSCTRS_BURST_INFILGHT_FAIL;      
@@ -518,9 +538,14 @@ static int video_trs_launch_time_tasklet(struct st_main_impl* impl,
       pkts[i]->ol_flags |= inf->tx_launch_time_flag;
       *RTE_MBUF_DYNFIELD(pkts[i], inf->tx_dynfield_offset, uint64_t *) = target_ptp;        
     }
-      
+    
+    clock_gettime(CLOCK_REALTIME, &tp1);
     tx = rte_eth_tx_burst(s->port_id[s_port], s->queue_id[s_port], &pkts[0], valid_bulk);
+    clock_gettime(CLOCK_REALTIME, &tp2);
+    STAT_UPDATE_BURST_CALL_LAT(s, tp1, tp2);
+    
     s->stat_pkts_burst += tx;
+    
     
     if (tx < valid_bulk) {
       unsigned int remaining = valid_bulk - tx;
@@ -531,7 +556,7 @@ static int video_trs_launch_time_tasklet(struct st_main_impl* impl,
       for (i = 0; i < remaining; i++) s->trs_inflight[s_port][i] = pkts[tx + i];
     }
     STAT_UPDATE_BURST_INTER(s, now.tv_sec*1000000000+now.tv_nsec);
-    STAT_UPDATE_DEALINE_DELTA(s, earliest_target_ptp, now.tv_sec*1000000000+now.tv_nsec);
+    STAT_UPDATE_DEALINE_DELTA(s, earliest_target_ptp);
   }
 
   if (unlikely(pkt_idx == ST_TX_DUMMY_PKT_IDX)) {

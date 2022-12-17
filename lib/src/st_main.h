@@ -647,7 +647,11 @@ struct st_tx_video_session_impl {
   int64_t stat_min_deadline_delta;
   int64_t stat_avg_deadline_delta;
   uint64_t stat_deadline_delta_cnt;
-  
+    
+  uint64_t stat_max_burst_call_lat;
+  uint64_t stat_min_burst_call_lat;
+  uint64_t stat_avg_burst_call_lat;
+  uint64_t stat_burst_call_cnt;
 };
 
 struct st_tx_video_sessions_mgr {

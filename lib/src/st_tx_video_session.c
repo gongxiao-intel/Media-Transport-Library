@@ -2283,6 +2283,14 @@ static void tv_stat(struct st_tx_video_sessions_mgr* mgr,
   s->stat_burst_cnt = 0;
 
   info(
+      "TX_VIDEO_SESSION(%d,%d:%s): burst call latency avg: %lu, min: %lu, max: %lu\n",
+      m_idx, idx, s->ops_name, s->stat_avg_burst_call_lat, s->stat_min_burst_call_lat, s->stat_max_burst_call_lat);
+  s->stat_avg_burst_call_lat = 0;
+  s->stat_min_burst_call_lat = 0;
+  s->stat_max_burst_call_lat = 0;
+  s->stat_burst_call_cnt = 0;
+
+  info(
       "TX_VIDEO_SESSION(%d,%d:%s): deadline delta avg: %ld, min: %ld, max: %ld\n",
       m_idx, idx, s->ops_name, s->stat_avg_deadline_delta, s->stat_min_deadline_delta, s->stat_max_deadline_delta);
   s->stat_avg_deadline_delta = 0;
