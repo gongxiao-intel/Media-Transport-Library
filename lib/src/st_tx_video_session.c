@@ -2298,6 +2298,14 @@ static void tv_stat(struct st_tx_video_sessions_mgr* mgr,
   s->stat_max_deadline_delta = 0;
   s->stat_deadline_delta_cnt = 0;
 
+  info(
+      "TX_VIDEO_SESSION(%d,%d:%s): TPR inter avg: %ld, min: %ld, max: %ld\n",
+      m_idx, idx, s->ops_name, s->stat_avg_tpr_inter, s->stat_min_tpr_inter, s->stat_max_tpr_inter);
+  s->stat_avg_tpr_inter = 0;
+  s->stat_min_tpr_inter = 0;
+  s->stat_max_tpr_inter = 0;
+  s->stat_tpr_inter_cnt = 0;
+
   if (s->stat_epoch_troffset_mismatch) {
     info("TX_VIDEO_SESSION(%d,%d): mismatch epoch troffset %u\n", m_idx, idx,
          s->stat_epoch_troffset_mismatch);

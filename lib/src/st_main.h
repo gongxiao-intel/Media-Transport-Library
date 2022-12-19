@@ -652,6 +652,13 @@ struct st_tx_video_session_impl {
   uint64_t stat_min_burst_call_lat;
   uint64_t stat_avg_burst_call_lat;
   uint64_t stat_burst_call_cnt;
+  
+  uint64_t stat_prev_tpr;
+  uint64_t stat_max_tpr_inter;
+  uint64_t stat_min_tpr_inter;
+  uint64_t stat_avg_tpr_inter;
+  uint64_t stat_tpr_inter_cnt;
+  uint32_t stat_prev_rtp_ts;
 };
 
 struct st_tx_video_sessions_mgr {

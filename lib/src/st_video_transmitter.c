@@ -466,6 +466,30 @@ do {\
     _S->stat_burst_call_cnt++;\
 } while(0)
 
+#define STAT_UPDATE_TPR_INTER(S,P) \
+do {\
+    struct st_tx_video_session_impl *_S = S;\
+    struct st_rfc4175_video_hdr* _HDR = rte_pktmbuf_mtod(P, struct st_rfc4175_video_hdr*);\
+    struct st20_rfc4175_rtp_hdr* _RTP_HDR = &_HDR->rtp;\
+    uint64_t _TPR = st_tx_mbuf_get_ptp(P) + 5000;\
+    uint64_t _TPR_INTERVAL;\
+    if(_S->stat_prev_tpr) {\
+      _TPR_INTERVAL = (_TPR) - _S->stat_prev_tpr;\
+      if (_S->stat_prev_rtp_ts == _RTP_HDR->base.tmstamp) {\
+        if (_S->stat_min_tpr_inter==0 || _S->stat_min_tpr_inter>_TPR_INTERVAL) {\
+          _S->stat_min_tpr_inter = _TPR_INTERVAL;\
+        }\
+        if (_S->stat_max_tpr_inter==0 || _S->stat_max_tpr_inter<_TPR_INTERVAL) {\
+          _S->stat_max_tpr_inter = _TPR_INTERVAL;\
+        }\
+        _S->stat_avg_tpr_inter=(_S->stat_avg_tpr_inter*_S->stat_tpr_inter_cnt+_TPR_INTERVAL)/(_S->stat_tpr_inter_cnt+1);\
+        _S->stat_tpr_inter_cnt++;\
+      }\
+    }\
+    _S->stat_prev_tpr = (_TPR);\
+    _S->stat_prev_rtp_ts = _RTP_HDR->base.tmstamp;\
+} while(0)
+
 static int video_trs_launch_time_tasklet(struct st_main_impl* impl,
                                  struct st_tx_video_session_impl* s,
                                  enum st_session_port s_port) {
@@ -474,7 +498,7 @@ static int video_trs_launch_time_tasklet(struct st_main_impl* impl,
   int tx = 0;
   unsigned int n;
   uint64_t i;
-  uint64_t target_ptp, earliest_target_ptp;
+  uint64_t target_ptp;
   uint16_t port_id = s->port_id[s_port];
   struct st_interface* inf = st_if(impl, port_id);
   struct timespec now, tp1, tp2;
@@ -484,8 +508,6 @@ static int video_trs_launch_time_tasklet(struct st_main_impl* impl,
 
   /* check if any inflight pkts in transmitter */
   if (s->trs_inflight_num[s_port] > 0) {
-    earliest_target_ptp = st_tx_mbuf_get_ptp(s->trs_inflight[s_port][s->trs_inflight_idx[s_port]]) + 5000;
-    
     clock_gettime(CLOCK_REALTIME, &tp1);
     tx = rte_eth_tx_burst(s->port_id[s_port], s->queue_id[s_port],
                           &s->trs_inflight[s_port][s->trs_inflight_idx[s_port]],
@@ -493,13 +515,17 @@ static int video_trs_launch_time_tasklet(struct st_main_impl* impl,
     clock_gettime(CLOCK_REALTIME, &tp2);
     STAT_UPDATE_BURST_CALL_LAT(s, tp1, tp2);
     
+    for (i = 0; i < tx; i ++) {
+      target_ptp = st_tx_mbuf_get_ptp(s->trs_inflight[s_port][s->trs_inflight_idx[s_port]+i]) + 5000;
+      STAT_UPDATE_DEALINE_DELTA(s, target_ptp);
+    }
+    
     s->trs_inflight_num[s_port] -= tx;
     s->trs_inflight_idx[s_port] += tx;
     s->stat_pkts_burst += tx;
     
     if (tx > 0) {
       STAT_UPDATE_BURST_INTER(s, now.tv_sec*1000000000+now.tv_nsec);
-      STAT_UPDATE_DEALINE_DELTA(s, earliest_target_ptp);
       return ST_TASKLET_HAS_PENDING;
     } else {
       s->stat_trs_ret_code[s_port] = -STI_TSCTRS_BURST_INFILGHT_FAIL;      
@@ -533,7 +559,7 @@ static int video_trs_launch_time_tasklet(struct st_main_impl* impl,
   if (valid_bulk > 0) {
     for (i = 0; i < valid_bulk; i ++) {
       target_ptp = st_tx_mbuf_get_ptp(pkts[i]) + 5000;
-      if (i == 0) earliest_target_ptp = target_ptp;
+      STAT_UPDATE_TPR_INTER(s, pkts[i]);
       /* Put tx timestamp into transmit descriptor */
       pkts[i]->ol_flags |= inf->tx_launch_time_flag;
       *RTE_MBUF_DYNFIELD(pkts[i], inf->tx_dynfield_offset, uint64_t *) = target_ptp;        
@@ -556,7 +582,10 @@ static int video_trs_launch_time_tasklet(struct st_main_impl* impl,
       for (i = 0; i < remaining; i++) s->trs_inflight[s_port][i] = pkts[tx + i];
     }
     STAT_UPDATE_BURST_INTER(s, now.tv_sec*1000000000+now.tv_nsec);
-    STAT_UPDATE_DEALINE_DELTA(s, earliest_target_ptp);
+    for (i = 0; i < tx; i ++) {
+      target_ptp = st_tx_mbuf_get_ptp(pkts[i]) + 5000;
+      STAT_UPDATE_DEALINE_DELTA(s, target_ptp);
+    }
   }
 
   if (unlikely(pkt_idx == ST_TX_DUMMY_PKT_IDX)) {
