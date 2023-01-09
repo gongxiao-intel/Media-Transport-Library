@@ -11,6 +11,7 @@ dpdk_dep = dependency('libdpdk', required : true)
 libm_dep = cc.find_library('m', required : true)
 libpthread_dep = cc.find_library('pthread', required : true)
 libdl_dep = cc.find_library('dl', required : true)
+libgmp_dep = cc.find_library('gmp', required : true)
 if not is_windows
   libnuma_dep = cc.find_library('numa', required : true)
 endif
@@ -63,6 +64,6 @@ st_dpdk_lib += shared_library(meson.project_name(), sources,
   include_directories : st_dpdk_include_dir,
   c_args : st_dpdk_c_args,
   link_args : st_dpdk_link_c_args,
-  dependencies: [dpdk_dep, libm_dep, libnuma_dep, libpthread_dep, libdl_dep, jsonc_dep],
+  dependencies: [dpdk_dep, libm_dep, libnuma_dep, libpthread_dep, libdl_dep, jsonc_dep, libgmp_dep],
   install: true
 )

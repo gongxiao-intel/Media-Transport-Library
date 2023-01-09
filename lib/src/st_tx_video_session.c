@@ -5,6 +5,7 @@
 #include "st_tx_video_session.h"
 
 #include <math.h>
+#include <gmp.h>
 
 #include "st_dev.h"
 #include "st_err.h"
@@ -13,17 +14,83 @@
 #include "st_util.h"
 #include "st_video_transmitter.h"
 
-static inline double pacing_tr_offset_time(struct st_tx_video_pacing* pacing,
-                                           uint64_t epochs) {
-  return (epochs * pacing->frame_time) + pacing->tr_offset -
-         (pacing->tr_offset_vrx * pacing->trs);
+static inline uint64_t time2epochs(struct st_tx_video_session_impl* s, uint64_t time) {
+  /*
+   * Large number caculation.
+   * time / (NS_PER_S / (s->fps_tm.mul / s->fps_tm.den)) = (time * s->fps_tm.mul) / (NS_PER_S * s->fps_tm.den)
+   */
+  
+  uint64_t ret;
+  uint64_t second_ns = NS_PER_S;
+  mpz_t large_ret, large_time, large_den, large_mul, large_second_ns;
+  mpz_init(large_time);
+  mpz_init(large_den);
+  mpz_init(large_mul);
+  mpz_init(large_second_ns);
+  mpz_init(large_ret);
+
+  mpz_import(large_time, 1, 1, sizeof(time), 0, 0, &time);
+  mpz_import(large_den, 1, 1, sizeof(s->fps_tm.den), 0, 0, &s->fps_tm.den);
+  mpz_import(large_mul, 1, 1, sizeof(s->fps_tm.mul), 0, 0, &s->fps_tm.mul);
+  mpz_import(large_second_ns, 1, 1, sizeof(second_ns), 0, 0, &second_ns);
+  
+  mpz_mul(large_ret, large_time, large_mul);
+  mpz_div(large_ret, large_ret, large_den);
+  mpz_div(large_ret, large_ret, large_second_ns);
+  ret = mpz_get_ui(large_ret);
+  
+  mpz_clear(large_time);
+  mpz_clear(large_den);
+  mpz_clear(large_mul);
+  mpz_clear(large_second_ns);
+  mpz_clear(large_ret);
+  return ret; 
 }
 
-static inline uint32_t pacing_time_stamp(struct st_tx_video_pacing* pacing,
+static inline uint64_t epochs2time(struct st_tx_video_session_impl* s, uint64_t epochs) {
+  /*
+   * Large number caculation.
+   * epochs * (NS_PER_S / (s->fps_tm.mul / s->fps_tm.den))
+   */
+  uint64_t ret;
+  uint64_t second_ns = NS_PER_S;
+  mpz_t large_ret, large_epochs, large_den, large_mul, large_second_ns;
+  mpz_init(large_epochs);
+  mpz_init(large_den);
+  mpz_init(large_mul);
+  mpz_init(large_second_ns);
+  mpz_init(large_ret);
+  
+  mpz_import(large_epochs, 1, 1, sizeof(epochs), 0, 0, &epochs);
+  mpz_import(large_den, 1, 1, sizeof(s->fps_tm.den), 0, 0, &s->fps_tm.den);
+  mpz_import(large_mul, 1, 1, sizeof(s->fps_tm.mul), 0, 0, &s->fps_tm.mul);
+  mpz_import(large_second_ns, 1, 1, sizeof(second_ns), 0, 0, &second_ns);
+  
+  mpz_mul(large_ret, large_epochs, large_den);
+  mpz_mul(large_ret, large_ret, large_second_ns);
+  mpz_div(large_ret, large_ret, large_mul);
+  
+  ret = mpz_get_ui(large_ret);
+
+  mpz_clear(large_epochs);
+  mpz_clear(large_den);
+  mpz_clear(large_mul);
+  mpz_clear(large_second_ns);
+  mpz_clear(large_ret);
+  return ret; 
+}
+
+static inline double pacing_tr_offset_time(struct st_tx_video_session_impl* s,
+                                           uint64_t epochs) {
+  return epochs2time(s, epochs) + s->pacing.tr_offset -
+         (s->pacing.tr_offset_vrx * s->pacing.trs);
+}
+
+static inline uint32_t pacing_time_stamp(struct st_tx_video_session_impl* s,
                                          uint64_t epochs) {
-  double tr_offset_time = pacing_tr_offset_time(pacing, epochs);
+  double tr_offset_time = pacing_tr_offset_time(s, epochs);
   uint64_t tmstamp64 =
-      (tr_offset_time / pacing->frame_time) * pacing->frame_time_sampling;
+      (tr_offset_time / s->pacing.frame_time) * s->pacing.frame_time_sampling;
   uint32_t tmstamp32 = tmstamp64;
 
   return tmstamp32;
@@ -296,7 +363,7 @@ static int tv_init_pacing(struct st_main_impl* impl, struct st_tx_video_session_
   }
   pacing->trs = frame_time * ractive / s->st20_total_pkts;
   /* always use ST_PORT_P for ptp now */
-  pacing->cur_epochs = st_get_ptp_time(impl, ST_PORT_P) / frame_time;
+  pacing->cur_epochs = time2epochs(s, st_get_ptp_time(impl, ST_PORT_P));
   pacing->tsc_time_cursor = st_get_tsc(impl);
 
   /* 80 percent tr offset time as warmup pkts */
@@ -364,7 +431,7 @@ static int tv_sync_pacing(struct st_main_impl* impl, struct st_tx_video_session_
                           bool sync, uint64_t required_tai) {
   int idx = s->idx;
   struct st_tx_video_pacing* pacing = &s->pacing;
-  double frame_time = pacing->frame_time;
+
   /* always use ST_PORT_P for ptp now */
   uint64_t ptp_time = st_get_ptp_time(impl, ST_PORT_P);
   uint64_t next_epochs = pacing->cur_epochs + 1;
@@ -372,13 +439,13 @@ static int tv_sync_pacing(struct st_main_impl* impl, struct st_tx_video_session_
   double to_epoch_tr_offset;
 
   if (required_tai) {
-    uint64_t ptp_epochs = ptp_time / frame_time;
-    epochs = required_tai / frame_time;
+    uint64_t ptp_epochs = time2epochs(s, ptp_time);
+    epochs = time2epochs(s, required_tai);
     dbg("%s(%d), required tai %" PRIu64 " ptp_epochs %" PRIu64 " epochs %" PRIu64 "\n",
         __func__, idx, required_tai, ptp_epochs, epochs);
     if (epochs < ptp_epochs) s->stat_error_user_timestamp++;
   } else {
-    epochs = ptp_time / frame_time;
+    epochs = time2epochs(s, ptp_time);
   }
 
   dbg("%s(%d), ptp epochs %" PRIu64 " cur_epochs %" PRIu64 ", ptp_time %" PRIu64 "ms\n",
@@ -393,7 +460,7 @@ static int tv_sync_pacing(struct st_main_impl* impl, struct st_tx_video_session_
   }
 
   /* epoch resloved */
-  double ptp_tr_offset_time = pacing_tr_offset_time(pacing, epochs);
+  double ptp_tr_offset_time = pacing_tr_offset_time(s, epochs);
   to_epoch_tr_offset = ptp_tr_offset_time - ptp_time;
   if (to_epoch_tr_offset < 0) {
     /* current time run out of tr offset already, sync to next epochs */
@@ -403,7 +470,7 @@ static int tv_sync_pacing(struct st_main_impl* impl, struct st_tx_video_session_
         ptp_time / 1000 / 1000);
     s->stat_epoch_troffset_mismatch++;
     epochs++;
-    ptp_tr_offset_time = pacing_tr_offset_time(pacing, epochs);
+    ptp_tr_offset_time = pacing_tr_offset_time(s, epochs);
     to_epoch_tr_offset = ptp_tr_offset_time - ptp_time;
   }
 
@@ -417,7 +484,7 @@ static int tv_sync_pacing(struct st_main_impl* impl, struct st_tx_video_session_
 
   if (epochs > next_epochs) s->stat_epoch_drop += (epochs - next_epochs);
   pacing->cur_epochs = epochs;
-  pacing->cur_time_stamp = pacing_time_stamp(pacing, epochs);
+  pacing->cur_time_stamp = pacing_time_stamp(s, epochs);
   dbg("%s(%d), old time_cursor %fms\n", __func__, idx,
       pacing->tsc_time_cursor / 1000 / 1000);
   pacing->tsc_time_cursor = (double)st_get_tsc(impl) + to_epoch_tr_offset;
