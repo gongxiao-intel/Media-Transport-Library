@@ -36,13 +36,7 @@ git am $dpdk_st_kahawai/patches/dpdk/22.07/0006-net-ice-support-max-burst-size-c
 git am $dpdk_st_kahawai/patches/dpdk/22.07/0007-Add-support-for-i225-IT-ethernet-device-into-igc-pmd.patch
 git am $dpdk_st_kahawai/patches/dpdk/22.07/0008-Change-to-enable-PTP.patch
 git am $dpdk_st_kahawai/patches/dpdk/22.07/0009-ice-fix-ice_interrupt_handler-panic-when-stop.patch
-git am $dpdk_st_kahawai/patches/dpdk/22.07/0010-igc-fix-can-t-transmit-packet-though-others-queues-a.patch
-git am $dpdk_st_kahawai/patches/dpdk/22.07/0011-igc-fix-dynamic-field-flag-variables-can-t-be-access.patch
-git am $dpdk_st_kahawai/patches/dpdk/22.07/0012-igc-fix-other-queue-packets-launch-time-being-set.patch
-git am $dpdk_st_kahawai/patches/dpdk/22.07/0013-igc-fix-packets-not-honor-launchtime-at-begin-of-cyc.patch
-git am $dpdk_st_kahawai/patches/dpdk/22.07/0014-igc-Remove-unecessary-system-call-for-retrieving-cur.patch
-git am $dpdk_st_kahawai/patches/dpdk/22.07/0015-igc-Restore-nic-to-BE-transmission-mode.patch
-git am $dpdk_st_kahawai/patches/dpdk/22.07/0016-igc-Fix-no-launch-time-update-without-creating-a-new.patch
+git am $dpdk_st_kahawai/patches/dpdk/22.07/0010-igc-enable-launch-time-transmit-feature.patch
 ```
 
 #### 2.3 Build and install DPDK library
