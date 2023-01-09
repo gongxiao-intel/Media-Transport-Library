@@ -22,9 +22,9 @@
                     "start_port": 20000,
                     "payload_type": 112,
                     "tr_offset": "default",
-                    "video_format": "i1080p29",
-                    "pg_format": "YUV_422_10bit",
-                    "video_url": "/home/uzel/Downloads/test_rfc4175_yuv422be10packed.yuv"
+                    "video_format": "i1080p50",
+                    "pg_format": "YUV_422_8bit",
+                    "video_url": "tests/yuv422p.yuv"
                 }
             ]
         }

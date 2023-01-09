@@ -55,7 +55,7 @@ dkms.conf
 .*
 *.log
 *.diff
-*.yuv
+#*.yuv
 *.pcapng
 *.pcap
 *.raw
