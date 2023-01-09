@@ -1,0 +1,564 @@
+From 490459c70dd7406c66b0b21cfd943d94c1ef43e3 Mon Sep 17 00:00:00 2001
+From: gongxiao-intel <xiaoyan.gong@intel.com>
+Date: Mon, 9 Jan 2023 09:58:43 +0000
+Subject: [PATCH 10/10] igc: enable launch time transmit feature.
+
+Known issue:
+On i225, the packet transmit not honor to the launch time while the
+launch time closes to the QBV cycle boundary less than 5us.
+---
+ drivers/net/igc/base/igc_regs.h |  10 ++
+ drivers/net/igc/igc_ethdev.c    | 101 +++++++++----
+ drivers/net/igc/igc_ethdev.h    |   2 +
+ drivers/net/igc/igc_txrx.c      | 252 ++++++++++++++++++++++++--------
+ 4 files changed, 274 insertions(+), 91 deletions(-)
+
+diff --git a/drivers/net/igc/base/igc_regs.h b/drivers/net/igc/base/igc_regs.h
+index 012cb6d68d..a331f8d5e1 100644
+--- a/drivers/net/igc/base/igc_regs.h
++++ b/drivers/net/igc/base/igc_regs.h
+@@ -732,4 +732,14 @@
+ #define IGC_STQT(_n)           (0x3324 + 0x4 * (_n))
+ #define IGC_ENDQT(_n)          (0x3334 + 0x4 * (_n))
+ 
++#define IGC_TXQCTL_QAV_SEL_MASK           0x000000C0
++#define IGC_TXQCTL_QUEUE_MODE_LAUNCHT     0x00000001
++#define IGC_TQAVCC(_n)               (0x3004 + ((_n) * 0x40))
++#define IGC_TQAVHC(_n)               (0x300C + ((_n) * 0x40))
++#define IGC_GTXOFFSET                0x3310
++#define IGC_TXPBSIZE_TSN  0x04145145
++#define IGC_ADVTXD_TSN_CNTX_FIRST 0x00000080
++#define IGC_TXQCTL_DATA_FETCH_TIM     0xC3508000
++#define I225_TXPBSIZE_DEFAULT     0x04000014 /* TXPBSIZE default */
++#define IGC_DTXMXPKTSZ_DEFAULT    0x98 /* 9728-byte Jumbo frames */
+ #endif
+diff --git a/drivers/net/igc/igc_ethdev.c b/drivers/net/igc/igc_ethdev.c
+index f5a5b9bfeb..04f62906e3 100644
+--- a/drivers/net/igc/igc_ethdev.c
++++ b/drivers/net/igc/igc_ethdev.c
+@@ -645,6 +645,7 @@ eth_igc_stop(struct rte_eth_dev *dev)
+ 	struct rte_pci_device *pci_dev = RTE_ETH_DEV_TO_PCI(dev);
+ 	struct rte_intr_handle *intr_handle = pci_dev->intr_handle;
+ 	struct rte_eth_link link;
++  uint32_t tqavctrl;
+ 
+ 	dev->data->dev_started = 0;
+ 	adapter->stopped = 1;
+@@ -665,6 +666,27 @@ eth_igc_stop(struct rte_eth_dev *dev)
+ 
+ 	/* disable intr eventfd mapping */
+ 	rte_intr_disable(intr_handle);
++  
++	if (igc_timestamp_dynflag > 0) {
++		adapter->cycle_time = NSEC_PER_SEC;
++    adapter->base_time = 0;
++
++		IGC_WRITE_REG(hw, IGC_I350_DTXMXPKTSZ, IGC_DTXMXPKTSZ_DEFAULT);
++		IGC_WRITE_REG(hw, IGC_TXPBS, I225_TXPBSIZE_DEFAULT);
++
++		IGC_WRITE_REG(hw, IGC_QBVCYCLET_S, 0);
++		IGC_WRITE_REG(hw, IGC_QBVCYCLET, adapter->cycle_time);
++    
++    for(uint8_t i = 0; i < IGC_QUEUE_PAIRS_NUM; i ++) {
++      IGC_WRITE_REG(hw, IGC_STQT(i), 0);
++      IGC_WRITE_REG(hw, IGC_ENDQT(i), adapter->cycle_time);     
++      IGC_WRITE_REG(hw, IGC_TXQCTL(i), 0);
++    }
++    
++		tqavctrl = IGC_READ_REG(hw, IGC_TQAVCTRL);
++		tqavctrl &= ~(0x1 | 0x8);
++		IGC_WRITE_REG(hw, IGC_TQAVCTRL, tqavctrl);
++	}  
+ 
+ 	igc_reset_hw(hw);
+ 
+@@ -950,10 +972,10 @@ eth_igc_start(struct rte_eth_dev *dev)
+ 	uint32_t *speeds;
+ 	int ret;
+ 	uint32_t txqctl = 0;
++  uint32_t tqavcc = 0;
+ 	uint32_t sec, nsec, baset_l, baset_h, tqavctrl;
+-	uint32_t cycle_time;
+-	int64_t n, systime, base_time;
+-	struct timespec system_time;
++	uint64_t n, systime;
++	struct timespec systime_ts;
+ 
+ 	PMD_INIT_FUNC_TRACE();
+ 
+@@ -982,47 +1004,62 @@ eth_igc_start(struct rte_eth_dev *dev)
+ 	adapter->stopped = 0;
+ 
+ 	if (igc_timestamp_dynflag > 0) {
+-		cycle_time = NSEC_PER_SEC;
+-		base_time = 0;
+-
+-		IGC_WRITE_REG(hw, IGC_TSSDP, 0);
+-		IGC_WRITE_REG(hw, IGC_TSIM, 0x1);
+-		IGC_WRITE_REG(hw, IGC_IMS, 1<<19);
++		adapter->cycle_time = NSEC_PER_SEC;
++    adapter->base_time = 0;
+ 
+ 		IGC_WRITE_REG(hw, IGC_TSAUXC, 0);
+ 		IGC_WRITE_REG(hw, IGC_I350_DTXMXPKTSZ, 0x19);
+-		IGC_WRITE_REG(hw, IGC_TXPBS, 0x04145145);
+-
+-		tqavctrl = IGC_READ_REG(hw, IGC_TQAVCTRL);
+-		tqavctrl |= 0x1 | 0x8;
+-		IGC_WRITE_REG(hw, IGC_TQAVCTRL, tqavctrl);
+-
+-		IGC_WRITE_REG(hw, IGC_QBVCYCLET_S, cycle_time);
+-		IGC_WRITE_REG(hw, IGC_QBVCYCLET, cycle_time);
+-
+-		IGC_WRITE_REG(hw, IGC_STQT(0), 0);
+-		IGC_WRITE_REG(hw, IGC_ENDQT(0), NSEC_PER_SEC);
++		IGC_WRITE_REG(hw, IGC_TXPBS, IGC_TXPBSIZE_TSN);
++    IGC_WRITE_REG(hw, IGC_GTXOFFSET, 1500);
+ 
+-		txqctl |= 0x1;
+-		IGC_WRITE_REG(hw, IGC_TXQCTL(0), txqctl);
++		IGC_WRITE_REG(hw, IGC_QBVCYCLET_S, adapter->cycle_time);
++		IGC_WRITE_REG(hw, IGC_QBVCYCLET, adapter->cycle_time);
+ 
+-		clock_gettime(CLOCK_REALTIME, &system_time);
+-		IGC_WRITE_REG(hw, IGC_SYSTIML, system_time.tv_nsec);
+-		IGC_WRITE_REG(hw, IGC_SYSTIMH, system_time.tv_sec);
++		clock_gettime(CLOCK_REALTIME, &systime_ts);
++		IGC_WRITE_REG(hw, IGC_SYSTIML, systime_ts.tv_nsec);
++		IGC_WRITE_REG(hw, IGC_SYSTIMH, systime_ts.tv_sec);
+ 
+ 		nsec = IGC_READ_REG(hw, IGC_SYSTIML);
+ 		sec = IGC_READ_REG(hw, IGC_SYSTIMH);
+-		systime = (int64_t)sec * NSEC_PER_SEC + (int64_t)nsec;
++		systime = sec * NSEC_PER_SEC + nsec;
+ 
+-		if (systime > base_time) {
+-			n = (systime - base_time) / cycle_time;
+-			base_time = base_time + (n + 1) * cycle_time;
++		if (systime > adapter->base_time) {
++			n = (systime - adapter->base_time) / adapter->cycle_time;
++			adapter->base_time = adapter->base_time + (n + 1) * adapter->cycle_time;
+ 		}
+ 
+-		baset_h = base_time / NSEC_PER_SEC;
+-		baset_l = base_time % NSEC_PER_SEC;
++    baset_h = adapter->base_time / NSEC_PER_SEC;
++		baset_l = adapter->base_time % NSEC_PER_SEC;
+ 		IGC_WRITE_REG(hw, IGC_BASET_H, baset_h);
+ 		IGC_WRITE_REG(hw, IGC_BASET_L, baset_l);
++    
++    for(uint8_t i = 0; i < IGC_QUEUE_PAIRS_NUM; i ++) {
++      txqctl = 0;
++      switch(i) {
++        case 0:
++          txqctl |= IGC_TXQCTL_QUEUE_MODE_LAUNCHT;
++          break;
++        default:
++          break;
++      }
++
++      IGC_WRITE_REG(hw, IGC_STQT(i), 0);
++      IGC_WRITE_REG(hw, IGC_ENDQT(i), adapter->cycle_time);
++      
++			tqavcc = IGC_READ_REG(hw, IGC_TQAVCC(i));
++			tqavcc &= ~(IGC_TQAVCC_IDLE_SLOPE |
++				    IGC_TQAVCC_KEEP_CREDITS);
++			IGC_WRITE_REG(hw, IGC_TQAVCC(i), tqavcc);
++
++			IGC_WRITE_REG(hw, IGC_TQAVHC(i), 0);
++      
++      txqctl &= ~(IGC_TXQCTL_QAV_SEL_MASK);
++      IGC_WRITE_REG(hw, IGC_TXQCTL(i), txqctl);
++    }
++    
++		tqavctrl = IGC_READ_REG(hw, IGC_TQAVCTRL);
++		tqavctrl |= 0x1 | 0x8;
++		IGC_WRITE_REG(hw, IGC_TQAVCTRL, tqavctrl);
+ 	}
+ 
+ 	/* check and configure queue intr-vector mapping */
+@@ -1617,6 +1654,8 @@ eth_igc_infos_get(struct rte_eth_dev *dev, struct rte_eth_dev_info *dev_info)
+ 
+ 	dev_info->max_mtu = dev_info->max_rx_pktlen - IGC_ETH_OVERHEAD;
+ 	dev_info->min_mtu = RTE_ETHER_MIN_MTU;
++  dev_info->default_txconf.reserved_ptrs[0] = &igc_timestamp_dynflag;
++  dev_info->default_txconf.reserved_ptrs[1] = &igc_timestamp_dynfield_offset;
+ 	return 0;
+ }
+ 
+diff --git a/drivers/net/igc/igc_ethdev.h b/drivers/net/igc/igc_ethdev.h
+index 56979409f8..94da5b5c0c 100644
+--- a/drivers/net/igc/igc_ethdev.h
++++ b/drivers/net/igc/igc_ethdev.h
+@@ -241,6 +241,8 @@ struct igc_adapter {
+ 	struct igc_syn_filter syn_filter;
+ 	struct igc_rss_filter rss_filter;
+ 	struct igc_flow_list flow_list;
++  uint64_t base_time;
++  uint32_t cycle_time;
+ };
+ 
+ #define IGC_DEV_PRIVATE(_dev)	((_dev)->data->dev_private)
+diff --git a/drivers/net/igc/igc_txrx.c b/drivers/net/igc/igc_txrx.c
+index 430928f9a2..1754aa8307 100644
+--- a/drivers/net/igc/igc_txrx.c
++++ b/drivers/net/igc/igc_txrx.c
+@@ -53,6 +53,8 @@
+ #define IGC_RXD_ETQF_SHIFT		12
+ #define IGC_RXD_ETQF_MSK		(0xfu << IGC_RXD_ETQF_SHIFT)
+ #define IGC_RXD_VPKT			(1u << 16)
++#define IGC_LAUNCH_TIME_OFFLOAD     (1ULL << 23)
++#define IGC_EMPTY_FRAME_SIZE 60
+ 
+ /* TXD control bits */
+ #define IGC_TXDCTL_PTHRESH_SHIFT	0
+@@ -82,7 +84,8 @@
+ 		RTE_MBUF_F_TX_L4_MASK |	\
+ 		RTE_MBUF_F_TX_TCP_SEG |	\
+ 		RTE_MBUF_F_TX_UDP_SEG | \
+-		RTE_MBUF_F_TX_IEEE1588_TMST)
++		RTE_MBUF_F_TX_IEEE1588_TMST | \
++    IGC_LAUNCH_TIME_OFFLOAD)
+ 
+ #define IGC_TX_OFFLOAD_SEG	(RTE_MBUF_F_TX_TCP_SEG | RTE_MBUF_F_TX_UDP_SEG)
+ 
+@@ -94,8 +97,6 @@
+ 
+ #define IGC_TX_OFFLOAD_NOTSUP_MASK (RTE_MBUF_F_TX_OFFLOAD_MASK ^ IGC_TX_OFFLOAD_MASK)
+ 
+-#define NSEC_PER_SEC	1000000000
+-
+ #define IGC_TS_HDR_LEN 16
+ #if 0
+ /**
+@@ -216,6 +217,9 @@ struct igc_tx_queue {
+ 	uint64_t	       offloads; /**< offloads of RTE_ETH_TX_OFFLOAD_* */
+ 	uint32_t	       start_time;
+ 	uint32_t	       end_time;
++  struct rte_eth_dev *dev;
++	uint64_t last_tx_cycle;          /* end of the cycle with a launchtime transmission */
++	uint64_t last_ff_cycle;          /* Last cycle with an active first flag */    
+ };
+ 
+ static inline uint64_t
+@@ -1511,15 +1515,52 @@ what_advctx_update(struct igc_tx_queue *txq, uint64_t flags,
+ 	return IGC_CTX_NUM;
+ }
+ 
+-static __le32 igc_tx_launchtime(uint64_t txtime)
++static int32_t igc_tx_launchtime(struct igc_tx_queue *txq, uint64_t txtime, 
++                                  bool *first_flag, bool *insert_empty,
++                                  uint64_t *last_ff_cycle, 
++                                  uint64_t *last_tx_cycle,
++                                  bool *early_deadline)
+ {
+-	uint64_t base_time = 0;
+-	uint64_t cycle_time = NSEC_PER_SEC;
+-	uint32_t launchtime;
+-
+-	launchtime = (txtime - base_time) % cycle_time;
+-
+-	return rte_cpu_to_le_32(launchtime);
++	int32_t launchtime;
++  uint64_t n, now, base_est, end_of_cycle;
++  struct timespec now_ts;
++  
++  struct igc_adapter *adapter = IGC_DEV_PRIVATE(txq->dev);
++  uint64_t base_time = adapter->base_time;
++  uint64_t cycle_time = adapter->cycle_time;
++  
++  clock_gettime(CLOCK_REALTIME, &now_ts);
++  now = now_ts.tv_sec*NSEC_PER_SEC+now_ts.tv_nsec;
++  
++  *early_deadline = (now + 300000 < txtime);
++  if (*early_deadline) 
++    return 0;
++  
++  n = (now - base_time) / cycle_time;
++  base_est = base_time + cycle_time * n;
++  end_of_cycle = base_est + cycle_time;
++  
++  if (txtime >= end_of_cycle) {
++    if (base_est != *last_ff_cycle) {
++      *first_flag = true;
++      *last_ff_cycle = base_est;
++      if (txtime > *last_tx_cycle) {
++        *insert_empty = true;
++      }
++    }
++  }
++  
++  *last_tx_cycle = end_of_cycle;
++  launchtime = txtime - base_est;
++  
++  if (launchtime > 0) {
++    launchtime = launchtime % cycle_time;
++  }
++  else {
++    launchtime = 0;
++  }
++
++	return launchtime;
+ }
+ 
+ /*
+@@ -1530,7 +1571,7 @@ static inline void
+ igc_set_xmit_ctx(struct igc_tx_queue *txq,
+ 		volatile struct igc_adv_tx_context_desc *ctx_txd,
+ 		uint64_t ol_flags, union igc_tx_offload tx_offload,
+-		uint64_t txtime)
++		int32_t launch_time, bool first_flag)
+ {
+ 	uint32_t type_tucmd_mlhl;
+ 	uint32_t mss_l4len_idx;
+@@ -1610,17 +1651,19 @@ igc_set_xmit_ctx(struct igc_tx_queue *txq,
+ 		tx_offload_mask.data & tx_offload.data;
+ 	txq->ctx_cache[ctx_curr].tx_offload_mask = tx_offload_mask;
+ #endif
++	if (igc_timestamp_dynflag > 0 && (ol_flags & IGC_LAUNCH_TIME_OFFLOAD)) {
++		ctx_txd->u.launch_time = rte_cpu_to_le_32(launch_time);
++    type_tucmd_mlhl |= IGC_ADVTXD_DTYP_CTXT | IGC_ADVTXD_DCMD_DEXT;
++    if (first_flag)
++      mss_l4len_idx |= IGC_ADVTXD_TSN_CNTX_FIRST;    
++	} else {
++		ctx_txd->u.launch_time = 0;
++	}
+ 
+ 	ctx_txd->type_tucmd_mlhl = rte_cpu_to_le_32(type_tucmd_mlhl);
+ 	vlan_macip_lens = (uint32_t)tx_offload.data;
+ 	ctx_txd->vlan_macip_lens = rte_cpu_to_le_32(vlan_macip_lens);
+ 	ctx_txd->mss_l4len_idx = rte_cpu_to_le_32(mss_l4len_idx);
+-
+-	if (ol_flags & RTE_MBUF_F_TX_IEEE1588_TMST) {
+-		ctx_txd->u.launch_time = igc_tx_launchtime(txtime);
+-	} else {
+-		ctx_txd->u.launch_time = 0;
+-	}
+ }
+ 
+ static inline uint32_t
+@@ -1668,7 +1711,6 @@ igc_xmit_pkts(void *tx_queue, struct rte_mbuf **tx_pkts, uint16_t nb_pkts)
+ 	uint16_t tx_last;
+ 	uint16_t nb_tx;
+ 	uint64_t tx_ol_req;
+-	uint32_t new_ctx = 0;
+ 	union igc_tx_offload tx_offload = {0};
+ 	uint64_t ts;
+ 
+@@ -1681,6 +1723,97 @@ igc_xmit_pkts(void *tx_queue, struct rte_mbuf **tx_pkts, uint16_t nb_pkts)
+ 
+ 		RTE_MBUF_PREFETCH_TO_FREE(txe->mbuf);
+ 
++		ol_flags = tx_pkt->ol_flags;
++		tx_ol_req = ol_flags & IGC_TX_OFFLOAD_MASK;
++
++    ts = 0;
++    bool first_flag = false;
++    bool insert_empty = false;
++    bool early_deadline = false;
++    int32_t launch_time = 0;
++    uint64_t last_ff_cycle = txq->last_ff_cycle;
++    uint64_t last_tx_cycle = txq->last_tx_cycle;
++    if (igc_timestamp_dynflag > 0 && (tx_ol_req & IGC_LAUNCH_TIME_OFFLOAD)) {
++      ts = *RTE_MBUF_DYNFIELD(tx_pkt,
++        igc_timestamp_dynfield_offset,
++        uint64_t *);
++        
++      launch_time = igc_tx_launchtime(txq, ts, &first_flag, &insert_empty,
++                                      &last_ff_cycle, &last_tx_cycle, &early_deadline);
++                                      
++      if (early_deadline) {
++        if (nb_tx == 0)
++          return 0;
++        goto end_of_tx;     
++      }
++                                      
++      if (insert_empty) {
++        /* FIX-ME: sending the empty packet.*/
++        /*
++        struct rte_mbuf * empty = rte_pktmbuf_alloc(tx_pkt->pool);
++        struct rte_ether_hdr *empty_frame = rte_pktmbuf_mtod(empty, struct rte_ether_hdr *);
++        memset(empty_frame, 0, IGC_EMPTY_FRAME_SIZE);
++        empty->pkt_len = IGC_EMPTY_FRAME_SIZE;
++        empty->data_len = IGC_EMPTY_FRAME_SIZE;
++        
++        volatile struct igc_adv_tx_context_desc *
++          empty_ctx = (volatile struct igc_adv_tx_context_desc *)&txr[tx_id];
++
++        tx_last = (uint16_t)(tx_id + 1);
++        if (tx_last >= txq->nb_tx_desc)
++          tx_last = (uint16_t)(tx_last - txq->nb_tx_desc);
++
++        tx_end = sw_ring[tx_last].last_id;
++        tx_end = sw_ring[tx_end].next_id;
++        tx_end = sw_ring[tx_end].last_id;
++        if (!(txr[tx_end].wb.status & IGC_TXD_STAT_DD)) {
++          if (nb_tx == 0)
++            return 0;
++          goto end_of_tx;
++        }
++        
++        txn = &sw_ring[txe->next_id];
++        RTE_MBUF_PREFETCH_TO_FREE(txn->mbuf);
++
++        if (txe->mbuf != NULL) {
++          rte_pktmbuf_free_seg(txe->mbuf);
++          txe->mbuf = NULL;
++        }
++
++        empty_ctx->type_tucmd_mlhl = rte_cpu_to_le_32(IGC_TXD_CMD_DEXT | IGC_ADVTXD_DTYP_CTXT);
++        empty_ctx->vlan_macip_lens = 0;
++        empty_ctx->mss_l4len_idx = 0;
++        empty_ctx->u.launch_time = 0;
++
++        txe->last_id = tx_last;
++        tx_id = txe->next_id;
++        txe = txn;
++        
++        txn = &sw_ring[txe->next_id];
++        RTE_MBUF_PREFETCH_TO_FREE(txn->mbuf);
++        txd = &txr[tx_id];
++
++        if (txe->mbuf != NULL)
++          rte_pktmbuf_free_seg(txe->mbuf);
++        txe->mbuf = empty;
++
++        slen = (uint16_t)empty->data_len;
++        buf_dma_addr = rte_mbuf_data_iova(empty);
++        txd->read.buffer_addr =
++          rte_cpu_to_le_64(buf_dma_addr);
++        txd->read.cmd_type_len =
++          rte_cpu_to_le_32(IGC_ADVTXD_DTYP_DATA | IGC_ADVTXD_DCMD_DEXT |
++                            IGC_ADVTXD_DCMD_IFCS | 
++                            (IGC_TXD_CMD_RS | IGC_TXD_CMD_EOP) | slen);
++        txd->read.olinfo_status =
++          rte_cpu_to_le_32(slen << IGC_ADVTXD_PAYLEN_SHIFT);
++        txe->last_id = tx_last;          
++        tx_id = txe->next_id;
++        txe = txn;
++        */          
++      }                                    
++    }
++
+ 		/*
+ 		 * The number of descriptors that must be allocated for a
+ 		 * packet is the number of segments of that packet, plus 1
+@@ -1691,9 +1824,6 @@ igc_xmit_pkts(void *tx_queue, struct rte_mbuf **tx_pkts, uint16_t nb_pkts)
+ 		 */
+ 		tx_last = (uint16_t)(tx_id + tx_pkt->nb_segs - 1);
+ 
+-		ol_flags = tx_pkt->ol_flags;
+-		tx_ol_req = ol_flags & IGC_TX_OFFLOAD_MASK;
+-
+ 		/* If a Context Descriptor need be built . */
+ 		if (tx_ol_req) {
+ 			tx_offload.l2_len = tx_pkt->l2_len;
+@@ -1702,12 +1832,7 @@ igc_xmit_pkts(void *tx_queue, struct rte_mbuf **tx_pkts, uint16_t nb_pkts)
+ 			tx_offload.vlan_tci = tx_pkt->vlan_tci;
+ 			tx_offload.tso_segsz = tx_pkt->tso_segsz;
+ 			tx_ol_req = check_tso_para(tx_ol_req, tx_offload);
+-
+-			new_ctx = what_advctx_update(txq, tx_ol_req,
+-					tx_offload);
+-			/* Only allocate context descriptor if required*/
+-			new_ctx = (new_ctx >= IGC_CTX_NUM);
+-			tx_last = (uint16_t)(tx_last + new_ctx);
++			tx_last = (uint16_t)(tx_last + 1);
+ 		}
+ 		if (tx_last >= txq->nb_tx_desc)
+ 			tx_last = (uint16_t)(tx_last - txq->nb_tx_desc);
+@@ -1762,11 +1887,24 @@ igc_xmit_pkts(void *tx_queue, struct rte_mbuf **tx_pkts, uint16_t nb_pkts)
+ 		/*
+ 		 * Check that this descriptor is free.
+ 		 */
+-		if (!(txr[tx_end].wb.status & IGC_TXD_STAT_DD)) {
+-			if (nb_tx == 0)
+-				return 0;
+-			goto end_of_tx;
+-		}
++    if (insert_empty) {
++      struct timespec sleep;
++      sleep.tv_nsec = 5000;
++      sleep.tv_sec = 0;
++      while (!(txr[tx_end].wb.status & IGC_TXD_STAT_DD)) {
++        nanosleep(&sleep, NULL);
++      }
++    }
++    else {
++      if (!(txr[tx_end].wb.status & IGC_TXD_STAT_DD)) {
++        if (nb_tx == 0)
++          return 0;
++        goto end_of_tx;
++      }
++    }
++    
++    txq->last_ff_cycle = last_ff_cycle;
++    txq->last_tx_cycle = last_tx_cycle;
+ 
+ 		/*
+ 		 * Set common flags of all TX Data Descriptors.
+@@ -1803,33 +1941,26 @@ igc_xmit_pkts(void *tx_queue, struct rte_mbuf **tx_pkts, uint16_t nb_pkts)
+ 		if (ol_flags & RTE_MBUF_F_TX_IEEE1588_TMST)
+ 			cmd_type_len |= IGC_ADVTXD_MAC_TSTAMP;
+ 
+-		if (tx_ol_req) {
+-			/* Setup TX Advanced context descriptor if required */
+-			if (new_ctx) {
+-				volatile struct igc_adv_tx_context_desc *
+-					ctx_txd = (volatile struct
+-					igc_adv_tx_context_desc *)&txr[tx_id];
+-
+-				txn = &sw_ring[txe->next_id];
+-				RTE_MBUF_PREFETCH_TO_FREE(txn->mbuf);
+-
+-				if (txe->mbuf != NULL) {
+-					rte_pktmbuf_free_seg(txe->mbuf);
+-					txe->mbuf = NULL;
+-				}
+-
+-				if (igc_timestamp_dynflag > 0)
+-					ts = *RTE_MBUF_DYNFIELD(tx_pkt,
+-						igc_timestamp_dynfield_offset,
+-						uint64_t *);
+-
+-				igc_set_xmit_ctx(txq, ctx_txd, tx_ol_req,
+-						tx_offload, ts);
+-
+-				txe->last_id = tx_last;
+-				tx_id = txe->next_id;
+-				txe = txn;
+-			}
++		if (tx_ol_req) {     
++      /* Setup TX Advanced context descriptor if required */
++      volatile struct igc_adv_tx_context_desc *
++        ctx_txd = (volatile struct
++        igc_adv_tx_context_desc *)&txr[tx_id];
++      
++      txn = &sw_ring[txe->next_id];
++      RTE_MBUF_PREFETCH_TO_FREE(txn->mbuf);
++
++      if (txe->mbuf != NULL) {
++        rte_pktmbuf_free_seg(txe->mbuf);
++        txe->mbuf = NULL;
++      }
++    
++      igc_set_xmit_ctx(txq, ctx_txd, tx_ol_req,
++          tx_offload, launch_time, first_flag);
++
++      txe->last_id = tx_last;
++      tx_id = txe->next_id;
++      txe = txn;
+ 
+ 			/* Setup the TX Advanced Data Descriptor */
+ 			cmd_type_len |=
+@@ -2088,6 +2219,7 @@ int eth_igc_tx_queue_setup(struct rte_eth_dev *dev, uint16_t queue_idx,
+ 	dev->data->tx_queues[queue_idx] = txq;
+ 	txq->offloads = tx_conf->offloads;
+ 	txq->offloads |= offloads;
++  txq->dev = dev;
+ 
+ 	if (txq->offloads & RTE_ETH_TX_OFFLOAD_SEND_ON_TIMESTAMP) {
+ 		err = rte_mbuf_dyn_tx_timestamp_register(
+-- 
+2.25.1
+
