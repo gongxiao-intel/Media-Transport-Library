@@ -418,12 +418,15 @@ do {\
     _S->stat_prev_burst_time = (T);\
 } while(0)
 
-#define STAT_UPDATE_DEALINE_DELTA(S,LAUNCH_T) \
+#define STAT_UPDATE_DEALINE_DELTA(S,P) \
 do {\
+    struct st_tx_video_session_impl *_S = S;\
+    /*struct st_rfc4175_video_hdr* _HDR = rte_pktmbuf_mtod(P, struct st_rfc4175_video_hdr*);*/\
+    /*struct st20_rfc4175_rtp_hdr* _RTP_HDR = &_HDR->rtp;*/\
+    uint64_t _TPR = st_tx_mbuf_get_ptp(P);\
     struct timespec _NOW;\
     clock_gettime(CLOCK_REALTIME, &_NOW);\
-    struct st_tx_video_session_impl *_S = S;\
-    int64_t _DEALINE_DELTA = (LAUNCH_T) - (_NOW.tv_sec*1000000000+_NOW.tv_nsec);\
+    int64_t _DEALINE_DELTA = (_TPR) - (_NOW.tv_sec*1000000000+_NOW.tv_nsec);\
     if (_S->stat_deadline_delta_cnt==0 || _S->stat_min_deadline_delta>_DEALINE_DELTA) {\
       _S->stat_min_deadline_delta = _DEALINE_DELTA;\
     }\
@@ -431,6 +434,10 @@ do {\
       _S->stat_max_deadline_delta = _DEALINE_DELTA;\
     }\
     _S->stat_avg_deadline_delta=(_S->stat_avg_deadline_delta*_S->stat_deadline_delta_cnt+_DEALINE_DELTA)/(_S->stat_deadline_delta_cnt+1);\
+    /*if (_DEALINE_DELTA < 0) {\
+      info("%s, over deadline %ldns at RTP SEQ/TS: %u/%u TPR: %lu\n", __func__, -1*_DEALINE_DELTA, _RTP_HDR->base.seq_number, _RTP_HDR->base.tmstamp, _TPR);\
+      _S->stat_over_deadline_cnt++;\
+    }*/\
     _S->stat_deadline_delta_cnt++;\
 } while(0)
 
@@ -471,7 +478,7 @@ do {\
     struct st_tx_video_session_impl *_S = S;\
     struct st_rfc4175_video_hdr* _HDR = rte_pktmbuf_mtod(P, struct st_rfc4175_video_hdr*);\
     struct st20_rfc4175_rtp_hdr* _RTP_HDR = &_HDR->rtp;\
-    uint64_t _TPR = st_tx_mbuf_get_ptp(P) + 5000;\
+    uint64_t _TPR = st_tx_mbuf_get_ptp(P);\
     uint64_t _TPR_INTERVAL;\
     if(_S->stat_prev_tpr) {\
       _TPR_INTERVAL = (_TPR) - _S->stat_prev_tpr;\
@@ -488,6 +495,11 @@ do {\
     }\
     _S->stat_prev_tpr = (_TPR);\
     _S->stat_prev_rtp_ts = _RTP_HDR->base.tmstamp;\
+} while(0)
+
+#define STAT_UPDATE_BURST_FAILED(S) \
+do {\
+    S->stat_burst_failed_cnt++;\
 } while(0)
 
 static int video_trs_launch_time_tasklet(struct st_main_impl* impl,
@@ -516,8 +528,7 @@ static int video_trs_launch_time_tasklet(struct st_main_impl* impl,
     STAT_UPDATE_BURST_CALL_LAT(s, tp1, tp2);
     
     for (i = 0; i < tx; i ++) {
-      target_ptp = st_tx_mbuf_get_ptp(s->trs_inflight[s_port][s->trs_inflight_idx[s_port]+i]) + 5000;
-      STAT_UPDATE_DEALINE_DELTA(s, target_ptp);
+      STAT_UPDATE_DEALINE_DELTA(s, s->trs_inflight[s_port][s->trs_inflight_idx[s_port]+i]);
     }
     
     s->trs_inflight_num[s_port] -= tx;
@@ -528,6 +539,7 @@ static int video_trs_launch_time_tasklet(struct st_main_impl* impl,
       STAT_UPDATE_BURST_INTER(s, now.tv_sec*1000000000+now.tv_nsec);
       return ST_TASKLET_HAS_PENDING;
     } else {
+      STAT_UPDATE_BURST_FAILED(s);
       s->stat_trs_ret_code[s_port] = -STI_TSCTRS_BURST_INFILGHT_FAIL;      
       return ST_TASKLET_ALL_DONE;
     }
@@ -558,7 +570,7 @@ static int video_trs_launch_time_tasklet(struct st_main_impl* impl,
 
   if (valid_bulk > 0) {
     for (i = 0; i < valid_bulk; i ++) {
-      target_ptp = st_tx_mbuf_get_ptp(pkts[i]) + 5000;
+      target_ptp = st_tx_mbuf_get_ptp(pkts[i]);
       STAT_UPDATE_TPR_INTER(s, pkts[i]);
       /* Put tx timestamp into transmit descriptor */
       pkts[i]->ol_flags |= inf->tx_launch_time_flag;
@@ -581,10 +593,15 @@ static int video_trs_launch_time_tasklet(struct st_main_impl* impl,
       s->trs_inflight_cnt[s_port]++;
       for (i = 0; i < remaining; i++) s->trs_inflight[s_port][i] = pkts[tx + i];
     }
-    STAT_UPDATE_BURST_INTER(s, now.tv_sec*1000000000+now.tv_nsec);
-    for (i = 0; i < tx; i ++) {
-      target_ptp = st_tx_mbuf_get_ptp(pkts[i]) + 5000;
-      STAT_UPDATE_DEALINE_DELTA(s, target_ptp);
+    if (tx > 0) {
+      STAT_UPDATE_BURST_INTER(s, now.tv_sec*1000000000+now.tv_nsec);
+      for (i = 0; i < tx; i ++) {
+        target_ptp = st_tx_mbuf_get_ptp(pkts[i]);
+        STAT_UPDATE_DEALINE_DELTA(s, pkts[i]);
+      }
+    }
+    else {
+      STAT_UPDATE_BURST_FAILED(s);    
     }
   }
 
