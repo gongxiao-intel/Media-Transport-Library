@@ -1,0 +1,93 @@
+From cd458652ff0913d10b6e8d081f61aefc341a7e40 Mon Sep 17 00:00:00 2001
+From: yanfengp <yanfeng.pu@intel.com>
+Date: Tue, 17 Jan 2023 13:12:19 +0800
+Subject: [PATCH] enable qbv and extend packet buffer size
+
+---
+ drivers/net/igc/base/igc_regs.h |  3 ++-
+ drivers/net/igc/igc_ethdev.c    | 32 +++++++++++++++++++++++++++-----
+ 2 files changed, 29 insertions(+), 6 deletions(-)
+
+diff --git a/drivers/net/igc/base/igc_regs.h b/drivers/net/igc/base/igc_regs.h
+index a331f8d5e1..f3362893c2 100644
+--- a/drivers/net/igc/base/igc_regs.h
++++ b/drivers/net/igc/base/igc_regs.h
+@@ -737,7 +737,8 @@
+ #define IGC_TQAVCC(_n)               (0x3004 + ((_n) * 0x40))
+ #define IGC_TQAVHC(_n)               (0x300C + ((_n) * 0x40))
+ #define IGC_GTXOFFSET                0x3310
+-#define IGC_TXPBSIZE_TSN  0x04145145
++//#define IGC_TXPBSIZE_TSN  0x04145145
++#define IGC_TXPBSIZE_TSN  0x0408208e
+ #define IGC_ADVTXD_TSN_CNTX_FIRST 0x00000080
+ #define IGC_TXQCTL_DATA_FETCH_TIM     0xC3508000
+ #define I225_TXPBSIZE_DEFAULT     0x04000014 /* TXPBSIZE default */
+diff --git a/drivers/net/igc/igc_ethdev.c b/drivers/net/igc/igc_ethdev.c
+index 04f62906e3..377d9f55a7 100644
+--- a/drivers/net/igc/igc_ethdev.c
++++ b/drivers/net/igc/igc_ethdev.c
+@@ -1004,7 +1004,7 @@ eth_igc_start(struct rte_eth_dev *dev)
+ 	adapter->stopped = 0;
+ 
+ 	if (igc_timestamp_dynflag > 0) {
+-		adapter->cycle_time = NSEC_PER_SEC;
++		adapter->cycle_time = 20000000; //NSEC_PER_SEC;
+     adapter->base_time = 0;
+ 
+ 		IGC_WRITE_REG(hw, IGC_TSAUXC, 0);
+@@ -1034,18 +1034,38 @@ eth_igc_start(struct rte_eth_dev *dev)
+ 		IGC_WRITE_REG(hw, IGC_BASET_L, baset_l);
+     
+     for(uint8_t i = 0; i < IGC_QUEUE_PAIRS_NUM; i ++) {
++
+       txqctl = 0;
++
+       switch(i) {
+         case 0:
+           txqctl |= IGC_TXQCTL_QUEUE_MODE_LAUNCHT;
++          IGC_WRITE_REG(hw, IGC_STQT(i), 0);
++          IGC_WRITE_REG(hw, IGC_ENDQT(i), adapter->cycle_time);
++          break;
++
++        case 1:
++            IGC_WRITE_REG(hw, IGC_STQT(i), 0);
++            IGC_WRITE_REG(hw, IGC_ENDQT(i), 700000);
++          break;
++
++        case 2:
++            IGC_WRITE_REG(hw, IGC_STQT(i), 0);
++            IGC_WRITE_REG(hw, IGC_ENDQT(i), 700000);
+           break;
++
++        case 3:
++            IGC_WRITE_REG(hw, IGC_STQT(i), 0);
++            IGC_WRITE_REG(hw, IGC_ENDQT(i), 700000);
++          break;
++
+         default:
+           break;
+       }
+ 
+-      IGC_WRITE_REG(hw, IGC_STQT(i), 0);
+-      IGC_WRITE_REG(hw, IGC_ENDQT(i), adapter->cycle_time);
+-      
++      txqctl |= (0x00000002 | 0x00000004);
++
++      if(i < 2) {
+ 			tqavcc = IGC_READ_REG(hw, IGC_TQAVCC(i));
+ 			tqavcc &= ~(IGC_TQAVCC_IDLE_SLOPE |
+ 				    IGC_TQAVCC_KEEP_CREDITS);
+@@ -1053,7 +1073,9 @@ eth_igc_start(struct rte_eth_dev *dev)
+ 
+ 			IGC_WRITE_REG(hw, IGC_TQAVHC(i), 0);
+       
+-      txqctl &= ~(IGC_TXQCTL_QAV_SEL_MASK);
++			txqctl &= ~(IGC_TXQCTL_QAV_SEL_MASK);
++      }
++      
+       IGC_WRITE_REG(hw, IGC_TXQCTL(i), txqctl);
+     }
+     
+-- 
+2.17.1
+
