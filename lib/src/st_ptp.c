@@ -311,7 +311,7 @@ static void ptp_delay_req_task(struct st_ptp_impl* ptp) {
 
 #if ST_PTP_USE_TX_TIME_STAMP
   /* Wait max 50 us to read TX timestamp. */
-  int max_retry = 50000;
+  int max_retry = 90000;
   int ret;
   uint64_t tx_ns = 0;
   while (max_retry > 0) {
@@ -433,7 +433,7 @@ static int ptp_parse_follow_up(struct st_ptp_impl* ptp,
   int64_t cur, delta;
 
   #define T_AD_TM (100000)
-  #define T_FR_CY (20000000)
+  #define T_FR_CY (40000000)
   #define T_TR_OF (200000)
 
   clock_gettime(CLOCK_REALTIME, &now);

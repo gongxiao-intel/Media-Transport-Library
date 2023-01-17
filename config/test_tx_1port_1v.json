@@ -22,7 +22,7 @@
                     "start_port": 50000,
                     "payload_type": 112,
                     "tr_offset": "default",
-                    "video_format": "i1080p50",
+                    "video_format": "i1080p25",
                     "pg_format": "YUV_422_8bit",
                     "video_url": "tests/yuv422p.yuv"
                 }
