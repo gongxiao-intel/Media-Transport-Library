@@ -1,12 +1,13 @@
-From e7e2cfed672959dc24f792ffb5247ed0ff7a285f Mon Sep 17 00:00:00 2001
+From 0798e73394364ae2df4acf887d6e6ecaed98a88d Mon Sep 17 00:00:00 2001
 From: yanfengp <yanfeng.pu@intel.com>
-Date: Tue, 17 Jan 2023 19:09:01 +0800
+Date: Wed, 18 Jan 2023 12:10:54 +0800
 Subject: [PATCH] enable qbv and extend packet buffer size
 
 ---
  drivers/net/igc/base/igc_regs.h |  3 ++-
  drivers/net/igc/igc_ethdev.c    | 30 +++++++++++++++++++++++++-----
- 2 files changed, 27 insertions(+), 6 deletions(-)
+ drivers/net/igc/igc_txrx.c      |  2 +-
+ 3 files changed, 28 insertions(+), 7 deletions(-)
 
 diff --git a/drivers/net/igc/base/igc_regs.h b/drivers/net/igc/base/igc_regs.h
 index a331f8d5e1..f3362893c2 100644
@@ -82,6 +83,19 @@ index 04f62906e3..5e1a2dc43a 100644
        IGC_WRITE_REG(hw, IGC_TXQCTL(i), txqctl);
      }
      
+diff --git a/drivers/net/igc/igc_txrx.c b/drivers/net/igc/igc_txrx.c
+index 1754aa8307..1f2f781039 100644
+--- a/drivers/net/igc/igc_txrx.c
++++ b/drivers/net/igc/igc_txrx.c
+@@ -1532,7 +1532,7 @@ static int32_t igc_tx_launchtime(struct igc_tx_queue *txq, uint64_t txtime,
+   clock_gettime(CLOCK_REALTIME, &now_ts);
+   now = now_ts.tv_sec*NSEC_PER_SEC+now_ts.tv_nsec;
+   
+-  *early_deadline = (now + 300000 < txtime);
++  *early_deadline = (now + 600000 < txtime);
+   if (*early_deadline) 
+     return 0;
+   
 -- 
 2.17.1
 
