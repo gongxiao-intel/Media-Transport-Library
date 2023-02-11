@@ -82,6 +82,8 @@ enum st_args_cmd {
   ST_ARG_TASKLET_SLEEP,
   ST_ARG_APP_THREAD,
   ST_ARG_RXTX_SIMD_512,
+
+  ST_ARG_PERF_DB_IP,
   ST_ARG_MAX,
 };
 
@@ -165,6 +167,8 @@ static struct option st_app_args_options[] = {
     {"tasklet_sleep", no_argument, 0, ST_ARG_TASKLET_SLEEP},
     {"app_thread", no_argument, 0, ST_ARG_APP_THREAD},
     {"rxtx_simd_512", no_argument, 0, ST_ARG_RXTX_SIMD_512},
+
+    {"perf_ip", required_argument, 0, ST_ARG_PERF_DB_IP},
 
     {0, 0, 0, 0}};
 
@@ -509,6 +513,10 @@ int st_app_parse_args(struct st_app_context* ctx, struct st_init_params* p, int 
         break;
       case ST_ARG_RXTX_SIMD_512:
         p->flags |= ST_FLAG_RXTX_SIMD_512;
+        break;
+      case ST_ARG_PERF_DB_IP:
+        inet_pton(AF_INET, optarg, ctx->perf_db_addr);
+        ctx->perf_db = true;
         break;
       case '?':
         break;

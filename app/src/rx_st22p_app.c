@@ -17,12 +17,31 @@ static int app_rx_st22p_frame_available(void* priv) {
 static void app_rx_st22p_consume_frame(struct st_app_rx_st22p_session* s,
                                        struct st_frame* frame) {
   struct st_display* d = s->display;
+  struct st_perf_rep* perf = s->perf_rep;
+  struct timespec spec;
+
+  if (perf) {
+    clock_gettime(CLOCK_REALTIME, &spec);
+
+    perf->perf_buf[perf->prod_indx].timestamp = frame->timestamp;
+    perf->perf_buf[perf->prod_indx].time_frame = spec;
+    perf->prod_indx ++;
+    if(perf->prod_indx >= PERF_BUF_LEN) {
+        perf->prod_indx = 0;
+    }
+
+    st_pthread_mutex_lock(&(perf->perf_wake_mutex));
+    st_pthread_cond_signal(&(perf->perf_wake_cond));
+    st_pthread_mutex_unlock(&(perf->perf_wake_mutex));
+  }
 
   if (d && d->front_frame) {
     if (st_pthread_mutex_trylock(&d->display_frame_mutex) == 0) {
-      if (frame->fmt == ST_FRAME_FMT_YUV422RFC4175PG2BE10) {
+      if (frame->fmt == ST_FRAME_FMT_YUV422PACKED8)
+        st_memcpy(d->front_frame, frame->addr, d->front_frame_size);
+      else if (frame->fmt == ST_FRAME_FMT_YUV422RFC4175PG2BE10)
         st20_rfc4175_422be10_to_422le8(frame->addr, d->front_frame, s->width, s->height);
-      } else {
+      else {
         st_pthread_mutex_unlock(&d->display_frame_mutex);
         return;
       }
@@ -65,7 +84,7 @@ static void* app_rx_st22p_frame_thread(void* arg) {
       dbg("%s, latency_us %lu\n", __func__, latency_ns / 1000);
       s->stat_latency_us_sum += latency_ns / 1000;
     }
-
+    
     app_rx_st22p_consume_frame(s, frame);
     s->stat_frame_total_received++;
     if (!s->stat_frame_frist_rx_time)
@@ -96,6 +115,12 @@ static int app_rx_st22p_uinit(struct st_app_rx_st22p_session* s) {
   if (s->display) {
     st_app_free(s->display);
     s->display = NULL;
+  }
+
+  st_app_uinit_perf(s->perf_rep);
+  if (s->perf_rep) {
+      st_app_free(s->perf_rep);
+      s->perf_rep = NULL;
   }
 
   s->st22p_app_thread_stop = true;
@@ -180,6 +205,17 @@ static int app_rx_st22p_init(struct st_app_context* ctx,
       return -EIO;
     }
     s->display = d;
+  }
+
+  if (ctx->perf_db) {
+    struct st_perf_rep* perf = st_app_zmalloc(sizeof(struct st_perf_rep));
+    ret = st_app_init_perf(perf, ctx->perf_db_addr);
+    if (ret < 0) {
+      err("%s(%d), st_app_init_perf fail %d\n", __func__, idx, ret);
+      app_rx_st22p_uinit(s);
+      return -EIO;
+    }
+    s->perf_rep = perf;
   }
 
   s->measure_latency = st22p ? st22p->measure_latency : true;

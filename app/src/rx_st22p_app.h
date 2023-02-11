@@ -11,6 +11,7 @@
 #include "app_base.h"
 #include "log.h"
 #include "player.h"
+#include "perf.h"
 
 #ifndef _RX_APP_ST22P_HEAD_H_
 #define _RX_APP_ST22P_HEAD_H_

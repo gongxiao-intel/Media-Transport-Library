@@ -47,6 +47,8 @@
 
 #define UTC_OFFSSET (37) /* 2022/07 */
 
+#define PERF_BUF_LEN (32)
+
 struct st_display {
   int idx;
   SDL_Window* window;
@@ -72,6 +74,32 @@ struct st_display {
   pthread_cond_t display_wake_cond;
   pthread_mutex_t display_wake_mutex;
   pthread_mutex_t display_frame_mutex;
+};
+
+struct st_perf_msg {
+    uint32_t flag;
+    uint32_t freq;
+    uint64_t time_record;
+    uint64_t timestamp;
+};
+
+struct st_perf_buf {
+    struct timespec time_frame;
+    uint64_t timestamp;
+};
+
+struct st_perf_rep {
+    pthread_cond_t perf_wake_cond;
+    pthread_mutex_t perf_wake_mutex;
+
+    bool perf_thread_stop;
+    pthread_t perf_thread;
+
+    struct sockaddr_in addr;
+
+    uint32_t prod_indx;
+    uint32_t cons_indx;
+    struct st_perf_buf perf_buf[PERF_BUF_LEN];
 };
 
 struct st_app_frameinfo {
@@ -396,6 +424,8 @@ struct st_app_rx_st22p_session {
 
   bool measure_latency;
   uint64_t stat_latency_us_sum;
+
+  struct st_perf_rep* perf_rep;
 };
 
 struct st_app_tx_st20p_session {
@@ -525,6 +555,9 @@ struct st_app_context {
   uint32_t pcapng_max_pkts;
   char ttf_file[ST_APP_URL_MAX_LEN];
   int utc_offset;
+
+  bool perf_db;
+  uint8_t perf_db_addr[ST_IP_ADDR_LEN];
 };
 
 static inline void* st_app_malloc(size_t sz) { return malloc(sz); }

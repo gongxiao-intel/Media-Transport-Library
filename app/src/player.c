@@ -5,8 +5,8 @@
 #include "player.h"
 
 #define FPS_CALCULATE_INTERVEL (30)
-#define SCREEN_WIDTH (640)
-#define SCREEN_HEIGHT (360)
+#define SCREEN_WIDTH (1920)
+#define SCREEN_HEIGHT (1080)
 #define MSG_WIDTH (60)
 #define MSG_HEIGHT (15)
 #define MSG_WIDTH_MARGIN (5)

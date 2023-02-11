@@ -1,0 +1,34 @@
+{
+    "interfaces": [
+        {
+            "name": "0000:01:00.0",
+            "ip": "192.168.22.85"
+        }
+    ],
+    "rx_sessions": [
+        {
+            "ip": [
+                "239.168.22.85"
+            ],
+            "interface": [
+                0
+            ],
+            "st22p": [
+                {
+                    "replicas": 1,
+                    "start_port": 50000,
+                    "payload_type": 114,
+                    "width": 3840,
+                    "height": 2160,
+                    "fps": "p50",
+                    "codec": "JPEG-XS",
+                    "device": "AUTO",
+                    "pack_type": "codestream",
+                    "output_format": "YUV422PACKED8",
+                    "codec_thread_count" : 5,
+                    "display": true
+                }
+            ]
+        }
+    ]
+}
