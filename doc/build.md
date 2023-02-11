@@ -38,6 +38,7 @@ git am $dpdk_st_kahawai/patches/dpdk/22.07/0008-Change-to-enable-PTP.patch
 git am $dpdk_st_kahawai/patches/dpdk/22.07/0009-ice-fix-ice_interrupt_handler-panic-when-stop.patch
 git am $dpdk_st_kahawai/patches/dpdk/22.07/0010-igc-enable-launch-time-transmit-feature.patch
 git am $dpdk_st_kahawai/patches/dpdk/22.07/0011-enable-qbv-and-extend-packet-buffer-size.patch
+git am $dpdk_st_kahawai/patches/dpdk/22.07/0012-change-igc-timestamp-adj-value.patch
 ```
 
 #### 2.3 Build and install DPDK library
