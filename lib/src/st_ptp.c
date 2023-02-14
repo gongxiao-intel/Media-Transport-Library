@@ -88,8 +88,11 @@ static inline bool ptp_port_id_equal(struct st_ptp_port_id* s, struct st_ptp_por
 static struct rte_ether_addr ptp_l4_multicast_eaddr = {
     {0x01, 0x00, 0x5e, 0x00, 0x01, 0x81}}; /* 224.0.1.129 */
 
+//static struct rte_ether_addr ptp_l2_multicast_eaddr = {
+//    {0x01, 0x1b, 0x19, 0x00, 0x00, 0x00}};
+
 static struct rte_ether_addr ptp_l2_multicast_eaddr = {
-    {0x01, 0x1b, 0x19, 0x00, 0x00, 0x00}};
+    {0x01, 0x80, 0xC2, 0x00, 0x00, 0x0E}};
 
 static inline void ptp_set_master_addr(struct st_ptp_impl* ptp,
                                        struct rte_ether_addr* d_addr) {
@@ -422,7 +425,8 @@ static int ptp_parse_follow_up(struct st_ptp_impl* ptp,
     return -EINVAL;
   }
 
-  ptp->t1 = ptp_net_tmstamp_to_ns(&msg->precise_origin_timestamp);
+  ptp->t1 = ptp_net_tmstamp_to_ns(&msg->precise_origin_timestamp) + (be64toh(msg->hdr.correction_field) >> 16);
+//  ptp->t1 = ptp_net_tmstamp_to_ns(&msg->precise_origin_timestamp);
   ptp->t1_domain_number = msg->hdr.domain_number;
   dbg("%s(%d), t1 %" PRIu64 ", ptp %" PRIu64 "\n", __func__, ptp->port, ptp->t1,
       ptp_get_raw_time(ptp));
@@ -451,9 +455,26 @@ static int ptp_parse_follow_up(struct st_ptp_impl* ptp,
 //rte_eal_alarm_set(ST_PTP_DELAY_REQ_US + (ptp->port * ST_PTP_DELAY_STEP_US),
 //                  ptp_delay_req_handler, ptp);
 #else
-  ptp_delay_req_task(ptp);
+{
+  struct timespec now;
+  int64_t cur;
+  static int64_t cnt = 0;
+
+  #define T_FR_CY (20000000UL)
+  #define T_TR_OE (500000UL)
+  #define T_PR_CN (480UL)
+
+  clock_gettime(CLOCK_REALTIME, &now);
+  cur = now.tv_nsec % T_FR_CY;
+
+  if ((cur < T_TR_OE) || (cnt < T_PR_CN)) {
+    ptp_delay_req_task(ptp);
+  }
+  cnt++;
+}
+//  ptp_delay_req_task(ptp);
 #endif
-  
+
   return 0;
 }
 
@@ -508,7 +529,8 @@ static int ptp_parse_delay_resp(struct st_ptp_impl* ptp,
     return -EIO;
   }
 
-  ptp->t4 = ptp_net_tmstamp_to_ns(&msg->receive_timestamp);
+  ptp->t4 = ptp_net_tmstamp_to_ns(&msg->receive_timestamp) - (be64toh(msg->hdr.correction_field) >> 16);
+//  ptp->t4 = ptp_net_tmstamp_to_ns(&msg->receive_timestamp);
   dbg("%s(%d), t4 %" PRIu64 ", seq %d, ptp %" PRIu64 "\n", __func__, ptp->port, ptp->t4,
       ptp->t3_sequence_id, ptp_get_raw_time(ptp));
 
