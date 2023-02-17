@@ -310,8 +310,8 @@ static void ptp_delay_req_task(struct st_ptp_impl* ptp) {
   }
 
 #if ST_PTP_USE_TX_TIME_STAMP
-  /* Wait max 50 us to read TX timestamp. */
-  int max_retry = 50;
+  /* Wait max 30 ms to read TX timestamp. */
+  int max_retry = 30000;
   int ret;
   uint64_t tx_ns = 0;
   while (max_retry > 0) {
@@ -428,8 +428,28 @@ static int ptp_parse_follow_up(struct st_ptp_impl* ptp,
       ptp_get_raw_time(ptp));
   
 #if ST_PTP_USE_TX_TIMER
-  rte_eal_alarm_set(ST_PTP_DELAY_REQ_US + (ptp->port * ST_PTP_DELAY_STEP_US),
-                    ptp_delay_req_handler, ptp);
+{
+  struct timespec now;
+  int64_t cur, delta;
+
+  #define T_FR_CY (20000000UL)
+  #define T_TR_OS (100000UL)
+  #define T_TR_OE (600000UL)
+
+  clock_gettime(CLOCK_REALTIME, &now);
+  cur = st_timespec_to_ns(&now);
+  delta = cur % T_FR_CY;
+  if (delta < T_TR_OE) {
+     delta = 1UL;
+  }
+  else {
+    delta = T_FR_CY - delta + T_TR_OS;
+    delta = delta / 1000UL;
+  }
+  rte_eal_alarm_set(delta, ptp_delay_req_handler, ptp);
+}
+//rte_eal_alarm_set(ST_PTP_DELAY_REQ_US + (ptp->port * ST_PTP_DELAY_STEP_US),
+//                  ptp_delay_req_handler, ptp);
 #else
   ptp_delay_req_task(ptp);
 #endif
