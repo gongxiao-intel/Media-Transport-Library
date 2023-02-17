@@ -2,13 +2,13 @@
     "interfaces": [
         {
             "name": "0000:01:00.0",
-            "ip": "192.168.1.1"
+            "ip": "192.168.22.85"
         }
     ],
     "tx_sessions": [
         {
             "dip": [
-                "192.168.1.2"
+                "239.168.22.85"
             ],
             "interface": [
                 0
@@ -19,10 +19,10 @@
                     "type": "frame",
                     "pacing": "gap",
                     "packing": "BPM",
-                    "start_port": 20000,
+                    "start_port": 50000,
                     "payload_type": 112,
                     "tr_offset": "default",
-                    "video_format": "i1080p50",
+                    "video_format": "i1080p25",
                     "pg_format": "YUV_422_8bit",
                     "video_url": "tests/yuv422p.yuv"
                 }
