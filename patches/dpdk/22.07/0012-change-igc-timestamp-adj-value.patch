@@ -1,0 +1,34 @@
+From 86d2aacd521d1f545989e8e4b7e7a900fe9d836d Mon Sep 17 00:00:00 2001
+From: "Pu, Yanfeng" <yanfeng.pu@intel.com>
+Date: Sat, 11 Feb 2023 14:12:08 +0800
+Subject: [PATCH] change igc timestamp adj value
+
+---
+ drivers/net/igc/igc_ethdev.c | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/net/igc/igc_ethdev.c b/drivers/net/igc/igc_ethdev.c
+index 377d9f55a7..c1ba3fbd89 100644
+--- a/drivers/net/igc/igc_ethdev.c
++++ b/drivers/net/igc/igc_ethdev.c
+@@ -2865,7 +2865,7 @@ igc_timesync_read_rx_timestamp(struct rte_eth_dev *dev,
+ 			       struct timespec *timestamp,
+ 			       uint32_t flags __rte_unused)
+ {
+-	rx_timestamp -= 1485;
++	rx_timestamp -= 300;
+ 	*timestamp = rte_ns_to_timespec(rx_timestamp);
+ 
+ 	return 0;
+@@ -2888,7 +2888,7 @@ igc_timesync_read_tx_timestamp(struct rte_eth_dev *dev,
+ 	sec = (uint64_t)IGC_READ_REG(hw, IGC_TXSTMPH);
+ 	tx_timestamp = sec * NSEC_PER_SEC + nsec;
+ 
+-	tx_timestamp += 1325;
++	tx_timestamp += 80;
+ 	*timestamp = rte_ns_to_timespec(tx_timestamp);
+ 
+ 	return 0;
+-- 
+2.25.1
+
