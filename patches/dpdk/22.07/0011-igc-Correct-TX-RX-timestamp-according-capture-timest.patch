@@ -1,0 +1,107 @@
+From efedbce9b7167b89db1da67202cc8df0cff31666 Mon Sep 17 00:00:00 2001
+From: gongxiao-intel <xiaoyan.gong@intel.com>
+Date: Wed, 22 Feb 2023 15:11:57 +0000
+Subject: [PATCH 11/11] igc: Correct TX & RX timestamp according capture
+ timestamp latency.
+
+When timestamping a packet there's a delay between the start of the
+packet and the point where the hardware actually captures the
+timestamp. This difference needs to be considered if we want accurate
+timestamps.
+---
+ drivers/net/igc/igc_ethdev.c | 43 ++++++++++++++++++++++++++++++++++--
+ drivers/net/igc/igc_txrx.c   |  6 ++---
+ 2 files changed, 44 insertions(+), 5 deletions(-)
+
+diff --git a/drivers/net/igc/igc_ethdev.c b/drivers/net/igc/igc_ethdev.c
+index 04f62906e3..22cd214934 100644
+--- a/drivers/net/igc/igc_ethdev.c
++++ b/drivers/net/igc/igc_ethdev.c
+@@ -2843,7 +2843,27 @@ igc_timesync_read_rx_timestamp(struct rte_eth_dev *dev,
+ 			       struct timespec *timestamp,
+ 			       uint32_t flags __rte_unused)
+ {
+-	rx_timestamp -= 1485;
++	uint32_t *speeds;	
++	speeds = &dev->data->dev_conf.link_speeds;
++	if (*speeds & RTE_ETH_LINK_SPEED_10M_HD) {
++		rx_timestamp -= 6450;
++	}
++	if (*speeds & RTE_ETH_LINK_SPEED_10M) {
++		rx_timestamp -= 6450;
++	}
++	if (*speeds & RTE_ETH_LINK_SPEED_100M_HD) {
++		rx_timestamp -= 185;
++	}
++	if (*speeds & RTE_ETH_LINK_SPEED_100M) {
++		rx_timestamp -= 185;
++	}
++	if (*speeds & RTE_ETH_LINK_SPEED_1G) {
++		rx_timestamp -= 300;
++	}
++	if (*speeds & RTE_ETH_LINK_SPEED_2_5G) {
++		rx_timestamp -= 1485;
++	}
++
+ 	*timestamp = rte_ns_to_timespec(rx_timestamp);
+ 
+ 	return 0;
+@@ -2866,7 +2886,26 @@ igc_timesync_read_tx_timestamp(struct rte_eth_dev *dev,
+ 	sec = (uint64_t)IGC_READ_REG(hw, IGC_TXSTMPH);
+ 	tx_timestamp = sec * NSEC_PER_SEC + nsec;
+ 
+-	tx_timestamp += 1325;
++	uint32_t *speeds;	
++	speeds = &dev->data->dev_conf.link_speeds;
++	if (*speeds & RTE_ETH_LINK_SPEED_10M_HD) {
++		tx_timestamp += 240;
++	}
++	if (*speeds & RTE_ETH_LINK_SPEED_10M) {
++		tx_timestamp += 240;
++	}
++	if (*speeds & RTE_ETH_LINK_SPEED_100M_HD) {
++		tx_timestamp += 58;
++	}
++	if (*speeds & RTE_ETH_LINK_SPEED_100M) {
++		tx_timestamp += 58;
++	}
++	if (*speeds & RTE_ETH_LINK_SPEED_1G) {
++		tx_timestamp += 80;
++	}
++	if (*speeds & RTE_ETH_LINK_SPEED_2_5G) {
++		tx_timestamp += 1325;
++	}
+ 	*timestamp = rte_ns_to_timespec(tx_timestamp);
+ 
+ 	return 0;
+diff --git a/drivers/net/igc/igc_txrx.c b/drivers/net/igc/igc_txrx.c
+index 1754aa8307..94ef50bf4a 100644
+--- a/drivers/net/igc/igc_txrx.c
++++ b/drivers/net/igc/igc_txrx.c
+@@ -1891,12 +1891,12 @@ igc_xmit_pkts(void *tx_queue, struct rte_mbuf **tx_pkts, uint16_t nb_pkts)
+       struct timespec sleep;
+       sleep.tv_nsec = 5000;
+       sleep.tv_sec = 0;
+-      while (!(txr[tx_end].wb.status & IGC_TXD_STAT_DD)) {
++      while (!(txr[tx_end].wb.status & rte_cpu_to_le_32(IGC_TXD_STAT_DD))) {
+         nanosleep(&sleep, NULL);
+       }
+     }
+     else {
+-      if (!(txr[tx_end].wb.status & IGC_TXD_STAT_DD)) {
++      if (!(txr[tx_end].wb.status & rte_cpu_to_le_32(IGC_TXD_STAT_DD))) {
+         if (nb_tx == 0)
+           return 0;
+         goto end_of_tx;
+@@ -2088,7 +2088,7 @@ igc_reset_tx_queue(struct igc_tx_queue *txq)
+ 	for (i = 0; i < txq->nb_tx_desc; i++) {
+ 		volatile union igc_adv_tx_desc *txd = &txq->tx_ring[i];
+ 
+-		txd->wb.status = IGC_TXD_STAT_DD;
++		txd->wb.status = rte_cpu_to_le_32(IGC_TXD_STAT_DD);
+ 		txe[i].mbuf = NULL;
+ 		txe[i].last_id = i;
+ 		txe[prev].next_id = i;
+-- 
+2.25.1
+
