@@ -89,7 +89,7 @@ static struct rte_ether_addr ptp_l4_multicast_eaddr = {
     {0x01, 0x00, 0x5e, 0x00, 0x01, 0x81}}; /* 224.0.1.129 */
 
 static struct rte_ether_addr ptp_l2_multicast_eaddr = {
-    {0x01, 0x1b, 0x19, 0x00, 0x00, 0x00}};
+     {0x01, 0x80, 0xC2, 0x00, 0x00, 0x0E}};
 
 static inline void ptp_set_master_addr(struct st_ptp_impl* ptp,
                                        struct rte_ether_addr* d_addr) {
