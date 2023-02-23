@@ -235,6 +235,15 @@ struct st_phc2sys_impl {
   int64_t stat_delta_max;  
 };
 
+enum ptp_stage {
+  PTP_IDLE = 0,
+  PTP_SYNC_DONE,
+  PTP_FOLLOW_UP_DONE,
+  PTP_DELAY_REQ_DONE,
+  PTP_DELAY_REQ_READ_TX_TIME_DONE,
+  PTP_DELAY_RES_DONE,
+};
+
 struct st_ptp_impl {
   struct st_main_impl* impl;
   struct st_phc2sys_impl phc2sys;
@@ -269,7 +278,8 @@ struct st_ptp_impl {
   
   struct pi_servo *servo;
   int64_t  path_delay_avg;
-  struct mave *path_delay_acc;  
+  struct mave *path_delay_acc;
+  enum ptp_stage cur_stage;  
   /* result */
   uint64_t delta_result_cnt;
   uint64_t delta_result_sum;
@@ -280,7 +290,7 @@ struct st_ptp_impl {
   int32_t expect_result_avg;
   uint64_t expect_result_start_ns;
   uint64_t expect_result_period_ns;
-
+  
   /* status */
   int64_t stat_delta_min;
   int64_t stat_delta_max;

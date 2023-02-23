@@ -235,15 +235,38 @@ static void ptp_adjust(struct st_ptp_impl* ptp) {
   ptp->stat_delta_cnt++;
   ptp->stat_delta_sum += abs(delta);
 }
-
+#if ST_PTP_USE_TX_TIME_STAMP
+static void ptp_delay_req_read_tx_time_handler(void* param) {
+  struct st_ptp_impl* ptp = param;
+  struct timespec ts;
+  uint16_t port_id = ptp->port_id;
+  uint64_t tx_ns = 0;
+  int ret;
+  if (ptp->cur_stage == PTP_DELAY_REQ_DONE) {
+    ptp_timesync_lock(ptp);
+    ret = rte_eth_timesync_read_tx_timestamp(port_id, &ts);
+    ptp_timesync_unlock(ptp);
+    if (ret >= 0) {
+      tx_ns = st_timespec_to_ns(&ts);
+      ptp->t3 = tx_ns;
+      ptp->cur_stage = PTP_DELAY_REQ_READ_TX_TIME_DONE;
+    }
+    else {
+      rte_eal_alarm_set(1, ptp_delay_req_read_tx_time_handler, ptp);
+    }
+  }
+  else {
+    ptp->stat_tx_sync_err++;
+  }
+}
+#endif
 static void ptp_delay_req_task(struct st_ptp_impl* ptp) {
   enum st_port port = ptp->port;
   uint16_t port_id = ptp->port_id;
   size_t hdr_offset;
   struct st_ptp_sync_msg* msg;
-  uint8_t is_valid_ts = 1;
 
-  if (ptp->t3) return; /* t3 already sent */
+  if (ptp->cur_stage != PTP_FOLLOW_UP_DONE) return; /* t3 already sent */
 
   struct rte_mbuf* m = rte_pktmbuf_alloc(ptp->mbuf_pool);
   if (!m) {
@@ -308,47 +331,13 @@ static void ptp_delay_req_task(struct st_ptp_impl* ptp) {
     err("%s(%d), rte_eth_tx_burst fail\n", __func__, port);
     return;
   }
+  
+  ptp->cur_stage = PTP_DELAY_REQ_DONE;
 
 #if ST_PTP_USE_TX_TIME_STAMP
-  /* Wait max 50 us to read TX timestamp. */
-  int max_retry = 50;
-  int ret;
-  uint64_t tx_ns = 0;
-  while (max_retry > 0) {
-    ptp_timesync_lock(ptp);
-    ret = rte_eth_timesync_read_tx_timestamp(port_id, &ts);
-    ptp_timesync_unlock(ptp);
-    if (ret >= 0) {
-      tx_ns = st_timespec_to_ns(&ts);
-      break;
-    }
-    st_delay_us(1);
-    max_retry--;
-  }
-
-  if (max_retry <= 0) {
-    err("%s(%d), read tx reach max retry\n", __func__, port);
-  }
-
-#if ST_PTP_CHECK_TX_TIME_STAMP
-  ptp_timesync_lock(ptp);
-  rte_eth_timesync_read_time(port_id, &ts);
-  ptp_timesync_unlock(ptp);
-
-  uint64_t ptp_ns = st_timespec_to_ns(&ts);
-  uint64_t delta = abs(ptp_ns - tx_ns);
-#define TX_MAX_DELTA (1 * 1000 * 1000) /* 1ms */
-  if (unlikely(delta > TX_MAX_DELTA)) {
-    dbg("%s(%d), tx_ns %" PRIu64 ", delta %" PRIu64 "\n", __func__, ptp->port, tx_ns,
-        delta);
-    ptp->stat_tx_sync_err++;
-    is_valid_ts = 0;
-  }
-#endif
-
-  if (is_valid_ts) ptp->t3 = tx_ns;
+  rte_eal_alarm_set(1, ptp_delay_req_read_tx_time_handler, ptp);
 #else
-  if (is_valid_ts) ptp->t3 = ptp_get_raw_time(ptp);
+  ptp->t3 = ptp_get_raw_time(ptp);
 #endif
   dbg("%s(%d), t3 %" PRIu64 ", seq %d, max_retry %d, ptp %" PRIu64 "\n", __func__, port,
       ptp->t3, ptp->t3_sequence_id, max_retry, ptp_get_raw_time(ptp));
@@ -410,6 +399,7 @@ static int ptp_parse_sync(struct st_ptp_impl* ptp, struct st_ptp_sync_msg* msg, 
   ptp->t2_mode = mode;
   dbg("%s(%d), t2 %" PRIu64 ", seq %d, ptp %" PRIu64 "\n", __func__, ptp->port, ptp->t2,
         ptp->t2_sequence_id, ptp_get_raw_time(ptp));
+  ptp->cur_stage = PTP_SYNC_DONE;
 
   return 0;
 }
@@ -426,7 +416,8 @@ static int ptp_parse_follow_up(struct st_ptp_impl* ptp,
   ptp->t1_domain_number = msg->hdr.domain_number;
   dbg("%s(%d), t1 %" PRIu64 ", ptp %" PRIu64 "\n", __func__, ptp->port, ptp->t1,
       ptp_get_raw_time(ptp));
-  
+
+  ptp->cur_stage = PTP_FOLLOW_UP_DONE;  
 #if ST_PTP_USE_TX_TIMER
   rte_eal_alarm_set(ST_PTP_DELAY_REQ_US + (ptp->port * ST_PTP_DELAY_STEP_US),
                     ptp_delay_req_handler, ptp);
@@ -493,13 +484,14 @@ static int ptp_parse_delay_resp(struct st_ptp_impl* ptp,
       ptp->t3_sequence_id, ptp_get_raw_time(ptp));
 
   /* all time get */
-  if (ptp->t3 && ptp->t2 && ptp->t1) {
+  if (ptp->cur_stage == PTP_DELAY_REQ_READ_TX_TIME_DONE && ptp->t2 && ptp->t1) {
     int64_t last_path_delay = (ptp->t2 - ptp->t1) + (ptp->t4 - ptp->t3);
     last_path_delay = last_path_delay / 2;
     ptp->path_delay_avg = mave_accumulate(ptp->path_delay_acc, last_path_delay);
     
     ptp_adjust(ptp);
   }
+  ptp->cur_stage = PTP_DELAY_RES_DONE;
 
   return 0;
 }
@@ -605,6 +597,7 @@ static int ptp_init(struct st_main_impl* impl, struct st_ptp_impl* ptp,
     ptp->phc2sys.realtime_nominal_tick =
       (1000000 + ptp->phc2sys.realtime_hz / 2) / ptp->phc2sys.realtime_hz;
   }
+  ptp->cur_stage = PTP_IDLE;
 
   struct st_init_params* p = st_get_user_params(impl);
   if (p->flags & ST_FLAG_PTP_UNICAST_ADDR) {
