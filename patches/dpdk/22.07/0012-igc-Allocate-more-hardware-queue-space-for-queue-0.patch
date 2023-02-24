@@ -1,0 +1,25 @@
+From e4f91313a58520156266eca600c721202a0a2d3a Mon Sep 17 00:00:00 2001
+From: gongxiao-intel <xiaoyan.gong@intel.com>
+Date: Fri, 24 Feb 2023 14:30:12 +0000
+Subject: [PATCH 12/12] igc: Allocate more hardware queue space for queue 0.
+
+---
+ drivers/net/igc/base/igc_regs.h | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/drivers/net/igc/base/igc_regs.h b/drivers/net/igc/base/igc_regs.h
+index a331f8d5e1..39d8649983 100644
+--- a/drivers/net/igc/base/igc_regs.h
++++ b/drivers/net/igc/base/igc_regs.h
+@@ -737,7 +737,7 @@
+ #define IGC_TQAVCC(_n)               (0x3004 + ((_n) * 0x40))
+ #define IGC_TQAVHC(_n)               (0x300C + ((_n) * 0x40))
+ #define IGC_GTXOFFSET                0x3310
+-#define IGC_TXPBSIZE_TSN  0x04145145
++#define IGC_TXPBSIZE_TSN  0x0408208e
+ #define IGC_ADVTXD_TSN_CNTX_FIRST 0x00000080
+ #define IGC_TXQCTL_DATA_FETCH_TIM     0xC3508000
+ #define I225_TXPBSIZE_DEFAULT     0x04000014 /* TXPBSIZE default */
+-- 
+2.25.1
+

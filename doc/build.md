@@ -38,6 +38,7 @@ git am $dpdk_st_kahawai/patches/dpdk/22.07/0008-Change-to-enable-PTP.patch
 git am $dpdk_st_kahawai/patches/dpdk/22.07/0009-ice-fix-ice_interrupt_handler-panic-when-stop.patch
 git am $dpdk_st_kahawai/patches/dpdk/22.07/0010-igc-enable-launch-time-transmit-feature.patch
 git am $dpdk_st_kahawai/patches/dpdk/22.07/0011-igc-Correct-TX-RX-timestamp-according-capture-timest.patch
+git am $dpdk_st_kahawai/patches/dpdk/22.07/0012-igc-Allocate-more-hardware-queue-space-for-queue-0.patch
 ```
 
 #### 2.3 Build and install DPDK library
