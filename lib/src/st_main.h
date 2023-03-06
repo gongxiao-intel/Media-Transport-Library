@@ -232,16 +232,7 @@ struct st_phc2sys_impl {
   struct pi_servo *servo;
   long realtime_hz;
   long realtime_nominal_tick;
-  int64_t stat_delta_max;  
-};
-
-enum ptp_stage {
-  PTP_IDLE = 0,
-  PTP_SYNC_DONE,
-  PTP_FOLLOW_UP_DONE,
-  PTP_DELAY_REQ_DONE,
-  PTP_DELAY_REQ_READ_TX_TIME_DONE,
-  PTP_DELAY_RES_DONE,
+  int64_t stat_delta_max;
 };
 
 struct st_ptp_impl {
@@ -279,7 +270,7 @@ struct st_ptp_impl {
   struct pi_servo *servo;
   int64_t  path_delay_avg;
   struct mave *path_delay_acc;
-  enum ptp_stage cur_stage;  
+  uint32_t skip_sync_cnt;
   /* result */
   uint64_t delta_result_cnt;
   uint64_t delta_result_sum;
