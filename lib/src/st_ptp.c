@@ -259,9 +259,7 @@ static void ptp_delay_req_task(struct st_ptp_impl* ptp) {
   enum st_port port = ptp->port;
   uint16_t port_id = ptp->port_id;
   size_t hdr_offset;
-  struct st_ptp_sync_msg* msg;
-
-  if (ptp->cur_stage != PTP_FOLLOW_UP_DONE) return; /* t3 already sent */
+  struct st_ptp_follow_up_msg* msg;
 
   struct rte_mbuf* m = rte_pktmbuf_alloc(ptp->mbuf_pool);
   if (!m) {
@@ -276,6 +274,8 @@ static void ptp_delay_req_task(struct st_ptp_impl* ptp) {
     m->ol_flags |= RTE_MBUF_F_TX_IEEE1588_TMST;
 #else
     m->ol_flags |= PKT_TX_IEEE1588_TMST;
+    m->ol_flags |= RTE_MBUF_F_TX_IP_CKSUM;
+    m->ol_flags |= RTE_MBUF_F_TX_UDP_CKSUM;
 #endif
   }
 
@@ -289,20 +289,25 @@ static void ptp_delay_req_task(struct st_ptp_impl* ptp) {
     rte_memcpy(ipv4_hdr, &ptp->dst_udp, sizeof(*ipv4_hdr));
     ipv4_hdr->udp.src_port = htons(ST_PTP_UDP_EVENT_PORT);
     ipv4_hdr->udp.dst_port = ipv4_hdr->udp.src_port;
+    ipv4_hdr->udp.dgram_cksum = 0;
     ipv4_hdr->ip.time_to_live = 255;
     ipv4_hdr->ip.packet_id = htons(ptp->t3_sequence_id);
+    ipv4_hdr->ip.next_proto_id = 17;
+    ipv4_hdr->ip.hdr_checksum = 0;
     st_mbuf_init_ipv4(m);
     hdr->ether_type = htons(RTE_ETHER_TYPE_IPV4);
   } else {
     hdr->ether_type = htons(RTE_ETHER_TYPE_1588);
   }
 
-  msg = rte_pktmbuf_mtod_offset(m, struct st_ptp_sync_msg*, hdr_offset);
+  msg = rte_pktmbuf_mtod_offset(m, struct st_ptp_follow_up_msg*, hdr_offset);
   memset(msg, 0x0, sizeof(*msg));
   msg->hdr.message_type = PTP_DELAY_REQ;
   msg->hdr.version = 2;
-  msg->hdr.message_length = htons(sizeof(struct st_ptp_sync_msg));
+  msg->hdr.message_length = htons(sizeof(struct st_ptp_follow_up_msg));
   msg->hdr.domain_number = ptp->t1_domain_number;
+  msg->hdr.control_field = CTL_DELAY_REQ;
+  msg->hdr.log_message_interval = 0x7f;
   rte_memcpy(&msg->hdr.source_port_identity, &ptp->our_port_id,
              sizeof(struct st_ptp_port_id));
   ptp->t3_sequence_id++;
@@ -310,7 +315,7 @@ static void ptp_delay_req_task(struct st_ptp_impl* ptp) {
 
   rte_eth_macaddr_get(port_id, st_eth_s_addr(hdr));
   ptp_set_master_addr(ptp, st_eth_d_addr(hdr));
-  m->pkt_len = hdr_offset + sizeof(struct st_ptp_sync_msg);
+  m->pkt_len = hdr_offset + sizeof(struct st_ptp_follow_up_msg);
   m->data_len = m->pkt_len;
 
 #if ST_PTP_USE_TX_TIME_STAMP
@@ -470,11 +475,12 @@ static int ptp_parse_annouce(struct st_ptp_impl* ptp, struct st_ptp_announce_msg
 
       rte_memcpy(dst_udp, ipv4_hdr, sizeof(*dst_udp));
       rte_memcpy(&dst_udp->ip.src_addr, &ptp->sip_addr[0], ST_IP_ADDR_LEN);
+      rte_memcpy(&dst_udp->ip.dst_addr, &ptp->mcast_group_addr[0], ST_IP_ADDR_LEN);
       dst_udp->ip.total_length =
-          htons(sizeof(struct st_ptp_ipv4_udp) + sizeof(struct st_ptp_sync_msg));
+          htons(sizeof(struct st_ptp_ipv4_udp) + sizeof(struct st_ptp_follow_up_msg));
       dst_udp->ip.hdr_checksum = 0;
       dst_udp->udp.dgram_len =
-          htons(sizeof(struct rte_udp_hdr) + sizeof(struct st_ptp_sync_msg));
+          htons(sizeof(struct rte_udp_hdr) + sizeof(struct st_ptp_follow_up_msg));
     }
 
     /* point ptp fn to eth if no user assigned ptp source */
@@ -643,21 +649,11 @@ static int ptp_init(struct st_main_impl* impl, struct st_ptp_impl* ptp,
   }
   ptp->tx_queue_active = true;
 
+  info("%s(%d), queue %d, sip: %d.%d.%d.%d\n", __func__, port, ptp->tx_queue_id, ip[0], ip[1], ip[2], ip[3]);
+
   inet_pton(AF_INET, "224.0.1.129", ptp->mcast_group_addr);
 
-  /* create rx queue */
-  struct st_rx_flow flow;
-  memset(&flow, 0, sizeof(flow));
-  flow.type = RTE_FLOW_ITEM_TYPE_ETH;
-  flow.ether_type = rte_cpu_to_be_16(RTE_ETHER_TYPE_1588);
-  flow.port_flow = false;
-  ret = st_dev_request_rx_queue(impl, port, &ptp->rx_queue_id, &flow);
-
-  if (ret < 0) {
-    err("%s(%d), ptp_rx_q create fail\n", __func__, port);
-    return ret;
-  }
-  ptp->rx_queue_active = true;
+  ptp->rx_queue_active = false;
 
   /* join mcast */
   ret = st_mcast_join(impl, st_ip_to_u32(ptp->mcast_group_addr), port);
@@ -667,8 +663,6 @@ static int ptp_init(struct st_main_impl* impl, struct st_ptp_impl* ptp,
   }
   st_mcast_l2_join(impl, &ptp_l2_multicast_eaddr, port);
 
-  info("%s(%d), queue %d %d, sip: %d.%d.%d.%d\n", __func__, port, ptp->tx_queue_id,
-       ptp->rx_queue_id, ip[0], ip[1], ip[2], ip[3]);
   return 0;
 }
 

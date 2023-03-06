@@ -631,6 +631,7 @@ static struct rte_flow* dev_rx_queue_create_flow(struct st_interface* inf, uint1
       memset(&ipv4_spec, 0, sizeof(ipv4_spec));
       memset(&ipv4_mask, 0, sizeof(ipv4_mask));
       ipv4_spec.hdr.next_proto_id = IPPROTO_UDP;
+      ipv4_mask.hdr.next_proto_id = 0xFF;
 
       if (drv_type != ST_DRV_IGC) {
         memset(&ipv4_mask.hdr.dst_addr, 0xFF, ST_IP_ADDR_LEN);

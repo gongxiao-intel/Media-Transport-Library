@@ -171,6 +171,8 @@ static int st_main_create(struct st_main_impl* impl) {
     err("%s, st_cni_init fail %d\n", __func__, ret);
     return ret;
   }
+  
+
 
   ret = st_admin_init(impl);
   if (ret < 0) {
