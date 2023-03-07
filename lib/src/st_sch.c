@@ -54,6 +54,8 @@ static int sch_tasklet_func(void* args) {
 
   sch->sleep_ratio_start_ns = st_get_tsc(impl);
 
+  struct timespec now, start_time;
+  clock_gettime(CLOCK_REALTIME, &start_time);
   while (rte_atomic32_read(&sch->request_stop) == 0) {
     int pending = ST_TASKLET_ALL_DONE;
     num_tasklet = sch->max_tasklet_idx;
@@ -61,6 +63,12 @@ static int sch_tasklet_func(void* args) {
       tasklet = sch->tasklet[i];
       if (!tasklet) continue;
       ops = &tasklet->ops;
+      if (strcmp(ops->name, "cni")) {
+        clock_gettime(CLOCK_REALTIME, &now);
+        if (now.tv_sec - start_time.tv_sec < 120) {
+          continue;
+        }
+      }
       if (time_measure) tsc_s = st_get_tsc(impl);
       pending += ops->handler(ops->priv);
       if (time_measure) {
@@ -69,7 +77,7 @@ static int sch_tasklet_func(void* args) {
         tasklet->stat_min_time_us = RTE_MIN(tasklet->stat_min_time_us, delta_us);
         tasklet->stat_sum_time_us += delta_us;
         tasklet->stat_time_cnt++;
-      }
+      }     
     }
     if (sch->allow_sleep && (pending == ST_TASKLET_ALL_DONE)) {
       uint64_t start = st_get_tsc(impl);

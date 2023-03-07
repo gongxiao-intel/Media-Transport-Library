@@ -296,7 +296,7 @@ int main(int argc, char** argv) {
       ctx->has_sdl = true;
     }
   }
-
+/*
   if (!ctx->runtime_session) {
     ret = st_start(ctx->st);
     if (ret < 0) {
@@ -305,7 +305,7 @@ int main(int argc, char** argv) {
       return -EIO;
     }
   }
-
+*/
   ret = st_app_tx_video_sessions_init(ctx);
   if (ret < 0) {
     err("%s, st_app_tx_video_sessions_init fail %d\n", __func__, ret);
@@ -398,6 +398,7 @@ int main(int argc, char** argv) {
       return -EIO;
     }
   }
+
 
   test_time_s = ctx->test_time_s;
   info("%s, app lunch succ, test time %ds\n", __func__, test_time_s);
