@@ -65,7 +65,7 @@ static int sch_tasklet_func(void* args) {
       ops = &tasklet->ops;
       if (strcmp(ops->name, "cni")) {
         clock_gettime(CLOCK_REALTIME, &now);
-        if (now.tv_sec - start_time.tv_sec < 120) {
+        if (now.tv_sec - start_time.tv_sec < 300) {
           continue;
         }
       }
