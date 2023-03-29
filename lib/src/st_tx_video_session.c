@@ -405,7 +405,7 @@ static int tv_init_pacing(struct st_main_impl* impl, struct st_tx_video_session_
       }
     }
     if (s->pacing_way[i] == ST21_TX_PACING_WAY_TSN) {
-        pacing->tr_offset_vrx = 0;
+        pacing->tr_offset_vrx = 1;
     }
   }
 
