@@ -1,0 +1,88 @@
+From 6004c75d03ef7aae3dfc789980bea3a4e493cc33 Mon Sep 17 00:00:00 2001
+From: gongxiao-intel <xiaoyan.gong@intel.com>
+Date: Wed, 8 Mar 2023 15:08:28 +0000
+Subject: [PATCH 13/13] igc: add qbv configuration for isolate ptp traffic and
+ media traffic.
+
+The configuration is for 1080p 25fps only.
+---
+ drivers/net/igc/igc_ethdev.c | 35 +++++++++++++++++++++++++----------
+ drivers/net/igc/igc_txrx.c   |  2 +-
+ 2 files changed, 26 insertions(+), 11 deletions(-)
+
+diff --git a/drivers/net/igc/igc_ethdev.c b/drivers/net/igc/igc_ethdev.c
+index 22cd214934..fb68321b75 100644
+--- a/drivers/net/igc/igc_ethdev.c
++++ b/drivers/net/igc/igc_ethdev.c
+@@ -1004,7 +1004,7 @@ eth_igc_start(struct rte_eth_dev *dev)
+ 	adapter->stopped = 0;
+ 
+ 	if (igc_timestamp_dynflag > 0) {
+-		adapter->cycle_time = NSEC_PER_SEC;
++		adapter->cycle_time = NSEC_PER_SEC/25;
+     adapter->base_time = 0;
+ 
+ 		IGC_WRITE_REG(hw, IGC_TSAUXC, 0);
+@@ -1038,22 +1038,37 @@ eth_igc_start(struct rte_eth_dev *dev)
+       switch(i) {
+         case 0:
+           txqctl |= IGC_TXQCTL_QUEUE_MODE_LAUNCHT;
++          IGC_WRITE_REG(hw, IGC_STQT(i), 0);
++          IGC_WRITE_REG(hw, IGC_ENDQT(i), adapter->cycle_time);
++          break;
++        case 1:
++          IGC_WRITE_REG(hw, IGC_STQT(i), 0);
++          IGC_WRITE_REG(hw, IGC_ENDQT(i), 1500000);
++          break;
++        case 2:
++          IGC_WRITE_REG(hw, IGC_STQT(i), 0);
++          IGC_WRITE_REG(hw, IGC_ENDQT(i), 1500000);
++          break;
++        case 3:
++          IGC_WRITE_REG(hw, IGC_STQT(i), 0);
++          IGC_WRITE_REG(hw, IGC_ENDQT(i), 1500000);
+           break;
+         default:
+           break;
+       }
+ 
+-      IGC_WRITE_REG(hw, IGC_STQT(i), 0);
+-      IGC_WRITE_REG(hw, IGC_ENDQT(i), adapter->cycle_time);
+-      
+-			tqavcc = IGC_READ_REG(hw, IGC_TQAVCC(i));
+-			tqavcc &= ~(IGC_TQAVCC_IDLE_SLOPE |
+-				    IGC_TQAVCC_KEEP_CREDITS);
+-			IGC_WRITE_REG(hw, IGC_TQAVCC(i), tqavcc);
++      txqctl |= (0x00000002 | 0x00000004);      
+ 
+-			IGC_WRITE_REG(hw, IGC_TQAVHC(i), 0);
++			if (i < 2) {
++        tqavcc = IGC_READ_REG(hw, IGC_TQAVCC(i));
++        tqavcc &= ~(IGC_TQAVCC_IDLE_SLOPE |
++              IGC_TQAVCC_KEEP_CREDITS);
++        IGC_WRITE_REG(hw, IGC_TQAVCC(i), tqavcc);
++
++        IGC_WRITE_REG(hw, IGC_TQAVHC(i), 0);
+       
+-      txqctl &= ~(IGC_TXQCTL_QAV_SEL_MASK);
++        txqctl &= ~(IGC_TXQCTL_QAV_SEL_MASK);
++      }
+       IGC_WRITE_REG(hw, IGC_TXQCTL(i), txqctl);
+     }
+     
+diff --git a/drivers/net/igc/igc_txrx.c b/drivers/net/igc/igc_txrx.c
+index 94ef50bf4a..e924c7b16f 100644
+--- a/drivers/net/igc/igc_txrx.c
++++ b/drivers/net/igc/igc_txrx.c
+@@ -1532,7 +1532,7 @@ static int32_t igc_tx_launchtime(struct igc_tx_queue *txq, uint64_t txtime,
+   clock_gettime(CLOCK_REALTIME, &now_ts);
+   now = now_ts.tv_sec*NSEC_PER_SEC+now_ts.tv_nsec;
+   
+-  *early_deadline = (now + 300000 < txtime);
++  *early_deadline = (now + 600000 < txtime);
+   if (*early_deadline) 
+     return 0;
+   
+-- 
+2.25.1
+
