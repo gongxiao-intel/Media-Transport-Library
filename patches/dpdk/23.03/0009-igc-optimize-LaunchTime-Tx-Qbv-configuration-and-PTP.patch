@@ -1,7 +1,7 @@
-From baef8069110189b92406e2f65244da8d3124c3e1 Mon Sep 17 00:00:00 2001
+From a5d487011a4711f5c33af7deffef8e792e4ce007 Mon Sep 17 00:00:00 2001
 From: gongxiao-intel <xiaoyan.gong@intel.com>
-Date: Thu, 25 May 2023 13:22:23 +0000
-Subject: [PATCH 8/8] igc: optimize LaunchTime Tx, Qbv configuration and PTP
+Date: Mon, 29 May 2023 12:06:19 +0000
+Subject: [PATCH 9/9] igc: optimize LaunchTime Tx, Qbv configuration and PTP 
  for SMPTE 2110-21 n-type transmission of 1080p 50fps video.
 
 1. Optimize LaunchTime Tx feature based on section 3.3.2.9.3.4 of doc#682924 rev-1.4.2 requirement.
@@ -21,7 +21,7 @@ other queues is opened at the 784us from the end of cycle.
  drivers/net/igc/base/igc_i225.c    |  16 +-
  drivers/net/igc/base/igc_phy.c     |   6 +-
  drivers/net/igc/base/igc_regs.h    |  29 +-
- drivers/net/igc/igc_ethdev.c       | 412 +++++++++++++++-----------
+ drivers/net/igc/igc_ethdev.c       | 406 ++++++++++++++-----------
  drivers/net/igc/igc_ethdev.h       |   5 +-
  drivers/net/igc/igc_flow.c         |   8 +-
  drivers/net/igc/igc_txrx.c         | 455 ++++++++++++++++++++++-------
@@ -32,7 +32,7 @@ other queues is opened at the 784us from the end of cycle.
  lib/ethdev/rte_ethdev.c            |  19 ++
  lib/ethdev/rte_ethdev.h            |  19 ++
  lib/ethdev/version.map             |   1 +
- 16 files changed, 708 insertions(+), 394 deletions(-)
+ 16 files changed, 702 insertions(+), 394 deletions(-)
 
 diff --git a/drivers/net/igc/base/igc_defines.h b/drivers/net/igc/base/igc_defines.h
 index 280570b157..30fd7affda 100644
@@ -110,10 +110,10 @@ index 280570b157..30fd7affda 100644
  
  /* M88E1000 Specific Registers */
 diff --git a/drivers/net/igc/base/igc_hw.h b/drivers/net/igc/base/igc_hw.h
-index e919a11c02..10edd9b02b 100644
+index fa21d74ff3..7c3f44e653 100644
 --- a/drivers/net/igc/base/igc_hw.h
 +++ b/drivers/net/igc/base/igc_hw.h
-@@ -164,7 +164,7 @@ struct igc_hw;
+@@ -165,7 +165,7 @@ struct igc_hw;
  #define IGC_DEV_ID_I225_V			0x15F3
  #define IGC_DEV_ID_I225_K			0x3100
  #define IGC_DEV_ID_I225_I			0x15F8
@@ -219,7 +219,7 @@ index e423814291..39d8649983 100644
 +#define IGC_DTXMXPKTSZ_DEFAULT    0x98 /* 9728-byte Jumbo frames */
  #endif
 diff --git a/drivers/net/igc/igc_ethdev.c b/drivers/net/igc/igc_ethdev.c
-index fab2ab6d1c..4e0044d5f0 100644
+index 58c4f80927..dd0b5f0deb 100644
 --- a/drivers/net/igc/igc_ethdev.c
 +++ b/drivers/net/igc/igc_ethdev.c
 @@ -7,7 +7,7 @@
@@ -253,8 +253,8 @@ index fab2ab6d1c..4e0044d5f0 100644
  
  static const struct rte_eth_desc_lim rx_desc_lim = {
  	.nb_max = IGC_MAX_RXD,
-@@ -109,8 +100,8 @@ static const struct rte_pci_id pci_id_igc_map[] = {
- 	{ RTE_PCI_DEVICE(IGC_INTEL_VENDOR_ID, IGC_DEV_ID_I225_LM) },
+@@ -110,8 +101,8 @@ static const struct rte_pci_id pci_id_igc_map[] = {
+ 	{ RTE_PCI_DEVICE(IGC_INTEL_VENDOR_ID, IGC_DEV_ID_I225_LMVP) },
  	{ RTE_PCI_DEVICE(IGC_INTEL_VENDOR_ID, IGC_DEV_ID_I225_V)  },
  	{ RTE_PCI_DEVICE(IGC_INTEL_VENDOR_ID, IGC_DEV_ID_I225_I)  },
 -	{ RTE_PCI_DEVICE(IGC_INTEL_VENDOR_ID, IGC_DEV_ID_I225_IT)  },
@@ -263,7 +263,7 @@ index fab2ab6d1c..4e0044d5f0 100644
  	{ RTE_PCI_DEVICE(IGC_INTEL_VENDOR_ID, IGC_DEV_ID_I226_K)  },
  	{ RTE_PCI_DEVICE(IGC_INTEL_VENDOR_ID, IGC_DEV_ID_I226_LMVP)  },
  	{ RTE_PCI_DEVICE(IGC_INTEL_VENDOR_ID, IGC_DEV_ID_I226_LM)  },
-@@ -258,19 +249,20 @@ eth_igc_vlan_filter_set(struct rte_eth_dev *dev, uint16_t vlan_id, int on);
+@@ -259,19 +250,20 @@ eth_igc_vlan_filter_set(struct rte_eth_dev *dev, uint16_t vlan_id, int on);
  static int eth_igc_vlan_offload_set(struct rte_eth_dev *dev, int mask);
  static int eth_igc_vlan_tpid_set(struct rte_eth_dev *dev,
  		      enum rte_vlan_type vlan_type, uint16_t tpid);
@@ -292,7 +292,7 @@ index fab2ab6d1c..4e0044d5f0 100644
  
  static const struct eth_dev_ops eth_igc_ops = {
  	.dev_configure		= eth_igc_configure,
-@@ -324,14 +316,15 @@ static const struct eth_dev_ops eth_igc_ops = {
+@@ -325,14 +317,15 @@ static const struct eth_dev_ops eth_igc_ops = {
  	.vlan_tpid_set		= eth_igc_vlan_tpid_set,
  	.vlan_strip_queue_set	= eth_igc_vlan_strip_queue_set,
  	.flow_ops_get		= eth_igc_flow_ops_get,
@@ -316,7 +316,7 @@ index fab2ab6d1c..4e0044d5f0 100644
  };
  
  /*
-@@ -652,6 +645,7 @@ eth_igc_stop(struct rte_eth_dev *dev)
+@@ -653,6 +646,7 @@ eth_igc_stop(struct rte_eth_dev *dev)
  	struct rte_pci_device *pci_dev = RTE_ETH_DEV_TO_PCI(dev);
  	struct rte_intr_handle *intr_handle = pci_dev->intr_handle;
  	struct rte_eth_link link;
@@ -324,7 +324,7 @@ index fab2ab6d1c..4e0044d5f0 100644
  
  	dev->data->dev_started = 0;
  	adapter->stopped = 1;
-@@ -673,6 +667,27 @@ eth_igc_stop(struct rte_eth_dev *dev)
+@@ -674,6 +668,27 @@ eth_igc_stop(struct rte_eth_dev *dev)
  	/* disable intr eventfd mapping */
  	rte_intr_disable(intr_handle);
  
@@ -352,7 +352,7 @@ index fab2ab6d1c..4e0044d5f0 100644
  	igc_reset_hw(hw);
  
  	/* disable all wake up */
-@@ -954,13 +969,13 @@ eth_igc_start(struct rte_eth_dev *dev)
+@@ -955,13 +970,13 @@ eth_igc_start(struct rte_eth_dev *dev)
  	struct igc_adapter *adapter = IGC_DEV_PRIVATE(dev);
  	struct rte_pci_device *pci_dev = RTE_ETH_DEV_TO_PCI(dev);
  	struct rte_intr_handle *intr_handle = pci_dev->intr_handle;
@@ -371,7 +371,7 @@ index fab2ab6d1c..4e0044d5f0 100644
  
  	PMD_INIT_FUNC_TRACE();
  
-@@ -988,6 +1003,80 @@ eth_igc_start(struct rte_eth_dev *dev)
+@@ -989,6 +1004,80 @@ eth_igc_start(struct rte_eth_dev *dev)
  	}
  	adapter->stopped = 0;
  
@@ -452,7 +452,7 @@ index fab2ab6d1c..4e0044d5f0 100644
  	/* check and configure queue intr-vector mapping */
  	if (rte_intr_cap_multiple(intr_handle) &&
  		dev->data->dev_conf.intr_conf.rxq) {
-@@ -1019,55 +1108,6 @@ eth_igc_start(struct rte_eth_dev *dev)
+@@ -1020,55 +1109,6 @@ eth_igc_start(struct rte_eth_dev *dev)
  		return ret;
  	}
  
@@ -508,7 +508,7 @@ index fab2ab6d1c..4e0044d5f0 100644
  	igc_clear_hw_cntrs_base_generic(hw);
  
  	/* VLAN Offload Settings */
-@@ -1629,6 +1669,8 @@ eth_igc_infos_get(struct rte_eth_dev *dev, struct rte_eth_dev_info *dev_info)
+@@ -1630,6 +1670,8 @@ eth_igc_infos_get(struct rte_eth_dev *dev, struct rte_eth_dev_info *dev_info)
  
  	dev_info->max_mtu = dev_info->max_rx_pktlen - IGC_ETH_OVERHEAD;
  	dev_info->min_mtu = RTE_ETHER_MIN_MTU;
@@ -517,35 +517,29 @@ index fab2ab6d1c..4e0044d5f0 100644
  	return 0;
  }
  
-@@ -2670,15 +2712,45 @@ eth_igc_vlan_tpid_set(struct rte_eth_dev *dev,
+@@ -2671,15 +2713,39 @@ eth_igc_vlan_tpid_set(struct rte_eth_dev *dev,
  }
  
  static int
 -eth_igc_timesync_enable(struct rte_eth_dev *dev)
 +eth_igc_read_clock(struct rte_eth_dev *dev, uint64_t *clock)
-+{
-+#if 0
-+	struct igc_hw *hw = IGC_DEV_PRIVATE_HW(dev);
-+	uint32_t sec, nsec;
-+
-+	nsec = IGC_READ_REG(hw, IGC_SYSTIML);
-+	sec = IGC_READ_REG(hw, IGC_SYSTIMH);
-+	*clock = sec * 1000000000 + (int64_t)nsec;
-+#endif
-+	struct timespec system_time;
+ {
+ 	struct igc_hw *hw = IGC_DEV_PRIVATE_HW(dev);
+ 	struct timespec system_time;
 +
 +	clock_gettime(CLOCK_REALTIME, &system_time);
 +	*clock = system_time.tv_sec * NSEC_PER_SEC + system_time.tv_nsec;
-+
++	IGC_WRITE_REG(hw, IGC_TIMINCA, 0);
++	
 +	return 0;
 +}
 +
 +static int
 +igc_timesync_enable(struct rte_eth_dev *dev)
- {
- 	struct igc_hw *hw = IGC_DEV_PRIVATE_HW(dev);
++{
++	struct igc_hw *hw = IGC_DEV_PRIVATE_HW(dev);
 +	uint32_t tsauxc, val;
- 	struct timespec system_time;
++	struct timespec system_time;
  	struct igc_rx_queue *rxq;
 -	uint32_t val;
  	uint16_t i;
@@ -565,7 +559,7 @@ index fab2ab6d1c..4e0044d5f0 100644
  
  	clock_gettime(CLOCK_REALTIME, &system_time);
  	IGC_WRITE_REG(hw, IGC_SYSTIML, system_time.tv_nsec);
-@@ -2686,16 +2758,13 @@ eth_igc_timesync_enable(struct rte_eth_dev *dev)
+@@ -2687,16 +2753,13 @@ eth_igc_timesync_enable(struct rte_eth_dev *dev)
  
  	/* Enable timestamping of received PTP packets. */
  	val = IGC_READ_REG(hw, IGC_RXPBS);
@@ -587,7 +581,7 @@ index fab2ab6d1c..4e0044d5f0 100644
  
  	val = IGC_TSYNCRXCTL_ENABLED | IGC_TSYNCRXCTL_TYPE_ALL |
  	      IGC_TSYNCRXCTL_RXSYNSIG;
-@@ -2704,8 +2773,6 @@ eth_igc_timesync_enable(struct rte_eth_dev *dev)
+@@ -2705,8 +2768,6 @@ eth_igc_timesync_enable(struct rte_eth_dev *dev)
  	/* Enable Timestamping of transmitted PTP packets. */
  	IGC_WRITE_REG(hw, IGC_TSYNCTXCTL, IGC_TSYNCTXCTL_ENABLED |
  		      IGC_TSYNCTXCTL_TXSYNSIG);
@@ -596,7 +590,7 @@ index fab2ab6d1c..4e0044d5f0 100644
  	IGC_READ_REG(hw, IGC_TXSTMPL);
  	IGC_READ_REG(hw, IGC_TXSTMPH);
  
-@@ -2718,7 +2785,7 @@ eth_igc_timesync_enable(struct rte_eth_dev *dev)
+@@ -2719,7 +2780,7 @@ eth_igc_timesync_enable(struct rte_eth_dev *dev)
  }
  
  static int
@@ -605,7 +599,7 @@ index fab2ab6d1c..4e0044d5f0 100644
  {
  	struct igc_hw *hw = IGC_DEV_PRIVATE_HW(dev);
  
-@@ -2729,7 +2796,7 @@ eth_igc_timesync_read_time(struct rte_eth_dev *dev, struct timespec *ts)
+@@ -2730,7 +2791,7 @@ eth_igc_timesync_read_time(struct rte_eth_dev *dev, struct timespec *ts)
  }
  
  static int
@@ -614,7 +608,7 @@ index fab2ab6d1c..4e0044d5f0 100644
  {
  	struct igc_hw *hw = IGC_DEV_PRIVATE_HW(dev);
  
-@@ -2740,18 +2807,18 @@ eth_igc_timesync_write_time(struct rte_eth_dev *dev, const struct timespec *ts)
+@@ -2741,18 +2802,18 @@ eth_igc_timesync_write_time(struct rte_eth_dev *dev, const struct timespec *ts)
  }
  
  static int
@@ -638,7 +632,7 @@ index fab2ab6d1c..4e0044d5f0 100644
  	ts = rte_ns_to_timespec(ns);
  
  	IGC_WRITE_REG(hw, IGC_SYSTIML, ts.tv_nsec);
-@@ -2761,86 +2828,106 @@ eth_igc_timesync_adjust_time(struct rte_eth_dev *dev, int64_t delta)
+@@ -2762,86 +2823,106 @@ eth_igc_timesync_adjust_time(struct rte_eth_dev *dev, int64_t delta)
  }
  
  static int
@@ -797,7 +791,7 @@ index fab2ab6d1c..4e0044d5f0 100644
  {
  	struct igc_hw *hw = IGC_DEV_PRIVATE_HW(dev);
  	uint32_t val;
-@@ -2852,23 +2939,14 @@ eth_igc_timesync_disable(struct rte_eth_dev *dev)
+@@ -2853,23 +2934,14 @@ eth_igc_timesync_disable(struct rte_eth_dev *dev)
  	IGC_WRITE_REG(hw, IGC_TSYNCRXCTL, 0);
  
  	val = IGC_READ_REG(hw, IGC_RXPBS);
@@ -1626,7 +1620,7 @@ index ad7d3b4ca5..f261043538 100644
   * RX/TX function prototypes
   */
 diff --git a/lib/ethdev/ethdev_driver.h b/lib/ethdev/ethdev_driver.h
-index 2c9d615fb5..ee0393fd2a 100644
+index 2c9d615fb5..e8b6feb826 100644
 --- a/lib/ethdev/ethdev_driver.h
 +++ b/lib/ethdev/ethdev_driver.h
 @@ -633,6 +633,9 @@ typedef int (*eth_timesync_read_tx_timestamp_t)(struct rte_eth_dev *dev,
@@ -1644,7 +1638,7 @@ index 2c9d615fb5..ee0393fd2a 100644
  	/** Get the device clock time */
  	eth_timesync_read_time     timesync_read_time;
 +	/** Adjust the clock frequency */
-+	eth_timesync_adjust_freq   timesync_adjust_freq;
++	eth_timesync_adjust_freq   timesync_adjust_freq;	
  	/** Set the device clock time */
  	eth_timesync_write_time    timesync_write_time;
  
