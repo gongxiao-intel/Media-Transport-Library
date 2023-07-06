@@ -3383,6 +3383,18 @@ static int rvs_mgr_init(struct mtl_main_impl* impl, struct mt_sch_impl* sch,
     return -EIO;
   }
 
+  memset(&ops, 0x0, sizeof(ops));
+  ops.priv = mgr;
+  ops.name = "rvs_ctl";
+  ops.start = rvs_ctl_tasklet_start;
+  ops.handler = rvs_ctl_tasklet_handler;
+
+  mgr->ctl_tasklet = mt_sch_register_tasklet(sch, &ops);
+  if (!mgr->ctl_tasklet) {
+    err("%s(%d), ctl_tasklet register fail\n", __func__, idx);
+    return -EIO;
+  }
+
   info("%s(%d), succ\n", __func__, idx);
   return 0;
 }
