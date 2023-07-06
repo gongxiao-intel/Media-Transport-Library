@@ -138,6 +138,7 @@ static int rx_st20p_frame_ready(void* priv, void* frame,
 
   framebuff->src.addr[0] = frame;
   framebuff->src.data_size = meta->frame_total_size;
+  framebuff->src.second_field = framebuff->dst.second_field = meta->second_field;
   framebuff->src.tfmt = framebuff->dst.tfmt = meta->tfmt;
   framebuff->src.timestamp = framebuff->dst.timestamp = meta->timestamp;
   framebuff->src.status = framebuff->dst.status = meta->status;
@@ -321,7 +322,6 @@ static int rx_st20p_create_transport(struct mtl_main_impl* impl, struct st20p_rx
   for (int i = 0; i < ops_rx.num_port; i++) {
     memcpy(ops_rx.sip_addr[i], ops->port.sip_addr[i], MTL_IP_ADDR_LEN);
     strncpy(ops_rx.port[i], ops->port.port[i], MTL_PORT_MAX_LEN);
-    ops_rx.udp_src_port[i] = ops->port.udp_src_port[i];
     ops_rx.udp_port[i] = ops->port.udp_port[i];
   }
   if (ops->flags & ST20P_RX_FLAG_DATA_PATH_ONLY)
@@ -353,6 +353,7 @@ static int rx_st20p_create_transport(struct mtl_main_impl* impl, struct st20p_rx
   ops_rx.height = ops->height;
   ops_rx.fps = ops->fps;
   ops_rx.fmt = ops->transport_fmt;
+  ops_rx.interlaced = ops->interlaced;
   ops_rx.linesize = ops->transport_linesize;
   ops_rx.payload_type = ops->port.payload_type;
   ops_rx.type = ST20_TYPE_FRAME_LEVEL;
@@ -399,7 +400,9 @@ static int rx_st20p_create_transport(struct mtl_main_impl* impl, struct st20p_rx
   struct st20p_rx_frame* frames = ctx->framebuffs;
   for (uint16_t i = 0; i < ctx->framebuff_cnt; i++) {
     frames[i].src.fmt = st_frame_fmt_from_transport(ctx->ops.transport_fmt);
-    frames[i].src.buffer_size = st_frame_size(frames[i].src.fmt, ops->width, ops->height);
+    frames[i].src.interlaced = ops->interlaced;
+    frames[i].src.buffer_size =
+        st_frame_size(frames[i].src.fmt, ops->width, ops->height, ops->interlaced);
     frames[i].src.data_size = frames[i].src.buffer_size;
     frames[i].src.width = ops->width;
     frames[i].src.height = ops->height;
@@ -457,6 +460,7 @@ static int rx_st20p_init_dst_fbs(struct mtl_main_impl* impl, struct st20p_rx_ctx
     frames[i].stat = ST20P_RX_FRAME_FREE;
     frames[i].idx = i;
     frames[i].dst.fmt = ops->output_fmt;
+    frames[i].dst.interlaced = ops->interlaced;
     frames[i].dst.width = ops->width;
     frames[i].dst.height = ops->height;
     if (!ctx->derive) { /* when derive, no need to alloc dst frames */
@@ -687,7 +691,7 @@ st20p_rx_handle st20p_rx_create(mtl_handle mt, struct st20p_rx_ops* ops) {
     return NULL;
   }
 
-  dst_size = st_frame_size(ops->output_fmt, ops->width, ops->height);
+  dst_size = st_frame_size(ops->output_fmt, ops->width, ops->height, ops->interlaced);
   if (!dst_size) {
     err("%s(%d), get dst size fail\n", __func__, idx);
     return NULL;

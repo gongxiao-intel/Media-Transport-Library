@@ -107,7 +107,7 @@ struct mt_ptp_port_id {
   uint16_t port_number;
 } __attribute__((packed));
 
-struct mt_ptp_ipv4_udp {
+struct mt_ipv4_udp {
   struct rte_ipv4_hdr ip;
   struct rte_udp_hdr udp;
 } __attribute__((__packed__));
@@ -168,7 +168,6 @@ struct mt_ptp_impl {
   enum mtl_port port;
   uint16_t port_id;
 
-  struct mt_rxq_entry* rxq;
   struct rte_mempool* mbuf_pool;
 
   uint8_t mcast_group_addr[MTL_IP_ADDR_LEN]; /* 224.0.1.129 */
@@ -176,7 +175,7 @@ struct mt_ptp_impl {
   struct mt_ptp_port_id master_port_id;
   struct rte_ether_addr master_addr;
   struct mt_ptp_port_id our_port_id;
-  struct mt_ptp_ipv4_udp dst_udp;    /* for l4 */
+  struct mt_ipv4_udp dst_udp;        /* for l4 */
   uint8_t sip_addr[MTL_IP_ADDR_LEN]; /* source IP */
   enum mt_ptp_addr_mode master_addr_mode;
   int16_t master_utc_offset; /* offset to UTC of current master PTP */
@@ -246,6 +245,15 @@ struct mt_cni_priv {
   enum mtl_port port;
 };
 
+struct mt_cni_udp_entry {
+  uint32_t tuple[3]; /* udp tuple identify */
+  int pkt_cnt;
+  /* linked list */
+  MT_TAILQ_ENTRY(mt_cni_udp_entry) next;
+};
+
+MT_TAILQ_HEAD(mt_cni_udp_list, mt_cni_udp_entry);
+
 struct mt_cni_impl {
   bool used; /* if enable cni */
   int num_ports;
@@ -256,6 +264,9 @@ struct mt_cni_impl {
   rte_atomic32_t stop_thread;
   bool lcore_tasklet;
   struct mt_sch_tasklet_impl* tasklet;
+
+  struct mt_cni_udp_list udps[MTL_PORT_MAX]; /* for udp stream debug usage */
+
   /* stat */
   uint32_t eth_rx_cnt[MTL_PORT_MAX];
   uint64_t eth_rx_bytes[MTL_PORT_MAX];
@@ -413,6 +424,17 @@ struct mt_sch_impl {
   bool rx_video_init;
   pthread_mutex_t rx_video_mgr_mutex; /* protect tx_video_mgr */
 
+  /* one tx audio sessions mgr/transmitter for one sch */
+  struct st_tx_audio_sessions_mgr tx_a_mgr;
+  struct st_audio_transmitter_impl a_trs;
+  bool tx_a_init;
+  pthread_mutex_t tx_a_mgr_mutex; /* protect tx_a_mgr */
+
+  /* one rx audio sessions mgr for one sch */
+  struct st_rx_audio_sessions_mgr rx_a_mgr;
+  bool rx_a_init;
+  pthread_mutex_t rx_a_mgr_mutex; /* protect rx_a_mgr */
+
   /* sch sleep info */
   bool allow_sleep;
   pthread_cond_t sleep_wake_cond;
@@ -456,10 +478,10 @@ struct mt_rxq_flow {
   bool no_ip_flow; /* no ip flow, only use port flow, for udp transport */
   /* mandatory if not no_ip_flow */
   uint8_t dip_addr[MTL_IP_ADDR_LEN]; /* rx destination IP */
+  /* source ip is ignored if destination is a multicast address */
   uint8_t sip_addr[MTL_IP_ADDR_LEN]; /* source IP */
-  bool no_port_flow;                 /* if apply port flow or not */
+  bool no_port_flow;                 /* if apply destination port flow or not */
   uint16_t dst_port;                 /* udp destination port */
-  uint16_t src_port;                 /* udp source port */
 
   /* optional */
   bool hdr_split; /* if request hdr split */
@@ -467,10 +489,6 @@ struct mt_rxq_flow {
 #ifdef ST_HAS_DPDK_HDR_SPLIT /* rte_eth_hdrs_mbuf_callback_fn define with this marco */
   rte_eth_hdrs_mbuf_callback_fn hdr_split_mbuf_cb;
 #endif
-  /* priv data to the cb for shared queue */
-  void* priv;
-  /* call back of the received mbufs by mt_rsq_burst or mt_rss_burst */
-  mt_rsq_mbuf_cb cb;
 };
 
 struct mt_rx_flow_rsp {
@@ -693,41 +711,19 @@ struct mt_dev_stats {
   uint64_t tx_errors;
 };
 
-struct mt_rss_impl; /* forward delcare */
-
-struct mt_rss_entry {
-  uint16_t queue_id;
-  struct mt_rxq_flow flow;
-  struct mt_rss_impl* rss;
-  uint32_t hash;
-  /* linked list */
-  MT_TAILQ_ENTRY(mt_rss_entry) next;
-};
-MT_TAILQ_HEAD(mt_rss_entrys_list, mt_rss_entry);
-
-struct mt_rss_queue {
-  uint16_t port_id;
-  uint16_t queue_id;
-  /* List of rss entry */
-  struct mt_rss_entrys_list head;
-  pthread_mutex_t mutex;
-};
-
-struct mt_rss_impl {
-  enum mtl_port port;
-  /* rss queue resources */
-  uint16_t max_rss_queues;
-  struct mt_rss_queue* rss_queues;
-};
-
 struct mt_rsq_impl; /* forward delcare */
 
 struct mt_rsq_entry {
   uint16_t queue_id;
+  int idx;
   struct mt_rxq_flow flow;
   uint16_t dst_port_net;
   struct mt_rx_flow_rsp* flow_rsp;
   struct mt_rsq_impl* parent;
+  struct rte_ring* ring;
+  uint32_t stat_enqueue_cnt;
+  uint32_t stat_dequeue_cnt;
+  uint32_t stat_enqueue_fail_cnt;
   /* linked list */
   MT_TAILQ_ENTRY(mt_rsq_entry) next;
 };
@@ -740,6 +736,8 @@ struct mt_rsq_queue {
   struct mt_rsq_entrys_list head;
   pthread_mutex_t mutex;
   rte_atomic32_t entry_cnt;
+  int entry_idx;
+  struct mt_rsq_entry* cni_entry;
   /* stat */
   int stat_pkts_recv;
   int stat_pkts_deliver;
@@ -799,7 +797,11 @@ struct mt_tsq_impl {
 struct mt_srss_entry {
   struct mt_rxq_flow flow;
   struct mt_srss_impl* srss;
-  uint16_t queue_id;
+  int idx;
+  struct rte_ring* ring;
+  uint32_t stat_enqueue_cnt;
+  uint32_t stat_dequeue_cnt;
+  uint32_t stat_enqueue_fail_cnt;
   /* linked list */
   MT_TAILQ_ENTRY(mt_srss_entry) next;
 };
@@ -815,6 +817,7 @@ struct mt_srss_impl {
   struct mt_sch_tasklet_impl* tasklet;
   struct mt_sch_impl* sch;
   struct mt_srss_entry* cni_entry;
+  int entry_idx;
 };
 
 struct mtl_main_impl {
@@ -871,20 +874,13 @@ struct mtl_main_impl {
   /* sch context */
   struct mt_sch_mgr sch_mgr;
   uint32_t tasklets_nb_per_sch;
+  uint32_t tx_audio_sessions_max_per_sch;
+  uint32_t rx_audio_sessions_max_per_sch;
 
   /* st plugin dev mgr */
   struct st_plugin_mgr plugin_mgr;
 
   void* mudp_rxq_mgr[MTL_PORT_MAX];
-
-  /* audio(st_30) context */
-  struct st_tx_audio_sessions_mgr tx_a_mgr;
-  struct st_audio_transmitter_impl a_trs;
-  struct st_rx_audio_sessions_mgr rx_a_mgr;
-  bool tx_a_init;
-  pthread_mutex_t tx_a_mgr_mutex; /* protect tx_a_mgr */
-  bool rx_a_init;
-  pthread_mutex_t rx_a_mgr_mutex; /* protect rx_a_mgr */
 
   /* ancillary(st_40) context */
   struct st_tx_ancillary_sessions_mgr tx_anc_mgr;
@@ -894,10 +890,6 @@ struct mtl_main_impl {
   pthread_mutex_t tx_anc_mgr_mutex; /* protect tx_anc_mgr */
   bool rx_anc_init;
   pthread_mutex_t rx_anc_mgr_mutex; /* protect rx_anc_mgr */
-
-  /* max queues user requested */
-  uint16_t user_tx_queues_cnt;
-  uint16_t user_rx_queues_cnt;
 
   /* cnt for open sessions */
   rte_atomic32_t st20_tx_sessions_cnt;
@@ -1083,12 +1075,8 @@ static inline enum mtl_rss_mode mt_get_rss_mode(struct mtl_main_impl* impl,
   return mt_if(impl, port)->rss_mode;
 }
 
-static inline bool mt_has_rss(struct mtl_main_impl* impl, enum mtl_port port) {
-  return mt_get_rss_mode(impl, port) != MTL_RSS_MODE_NONE;
-}
-
 static inline bool mt_has_srss(struct mtl_main_impl* impl, enum mtl_port port) {
-  return mt_get_rss_mode(impl, port) == MTL_RSS_MODE_L3_L4;
+  return mt_get_rss_mode(impl, port) != MTL_RSS_MODE_NONE;
 }
 
 static inline bool mt_udp_transport(struct mtl_main_impl* impl, enum mtl_port port) {
@@ -1126,8 +1114,15 @@ static inline bool mt_st2110_transport(struct mtl_main_impl* impl, enum mtl_port
     return false;
 }
 
-static inline bool mt_shared_queue(struct mtl_main_impl* impl, enum mtl_port port) {
-  if (mt_get_user_params(impl)->flags & MTL_FLAG_SHARED_QUEUE)
+static inline bool mt_shared_tx_queue(struct mtl_main_impl* impl, enum mtl_port port) {
+  if (mt_get_user_params(impl)->flags & MTL_FLAG_SHARED_TX_QUEUE)
+    return true;
+  else
+    return false;
+}
+
+static inline bool mt_shared_rx_queue(struct mtl_main_impl* impl, enum mtl_port port) {
+  if (mt_get_user_params(impl)->flags & MTL_FLAG_SHARED_RX_QUEUE)
     return true;
   else
     return false;

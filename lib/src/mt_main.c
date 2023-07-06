@@ -14,7 +14,6 @@
 #include "mt_log.h"
 #include "mt_mcast.h"
 #include "mt_ptp.h"
-#include "mt_rss.h"
 #include "mt_sch.h"
 #include "mt_shared_queue.h"
 #include "mt_shared_rss.h"
@@ -23,11 +22,8 @@
 #include "mt_util.h"
 #include "st2110/pipeline/st_plugin.h"
 #include "st2110/st_ancillary_transmitter.h"
-#include "st2110/st_audio_transmitter.h"
 #include "st2110/st_rx_ancillary_session.h"
-#include "st2110/st_rx_audio_session.h"
 #include "st2110/st_tx_ancillary_session.h"
-#include "st2110/st_tx_audio_session.h"
 #include "udp/udp_rxq.h"
 
 enum mtl_port mt_port_by_id(struct mtl_main_impl* impl, uint16_t port_id) {
@@ -97,26 +93,6 @@ static void* mt_calibrate_tsc(void* arg) {
   return NULL;
 }
 
-static int st_tx_audio_uinit(struct mtl_main_impl* impl) {
-  if (!impl->tx_a_init) return 0;
-
-  /* free tx audio context */
-  st_audio_transmitter_uinit(&impl->a_trs);
-  st_tx_audio_sessions_mgr_uinit(&impl->tx_a_mgr);
-
-  impl->tx_a_init = false;
-  return 0;
-}
-
-static int st_rx_audio_uinit(struct mtl_main_impl* impl) {
-  if (!impl->rx_a_init) return 0;
-
-  st_rx_audio_sessions_mgr_uinit(&impl->rx_a_mgr);
-
-  impl->rx_a_init = false;
-  return 0;
-}
-
 static int st_tx_anc_uinit(struct mtl_main_impl* impl) {
   if (!impl->tx_anc_init) return 0;
 
@@ -157,12 +133,6 @@ static int mt_main_create(struct mtl_main_impl* impl) {
   ret = mt_srss_init(impl);
   if (ret < 0) {
     err("%s, mt_srss_init fail %d\n", __func__, ret);
-    return ret;
-  }
-
-  ret = mt_rss_init(impl);
-  if (ret < 0) {
-    err("%s, mt_rss_init fail %d\n", __func__, ret);
     return ret;
   }
 
@@ -268,7 +238,6 @@ static int mt_main_free(struct mtl_main_impl* impl) {
   mt_map_uinit(impl);
   mt_dma_uinit(impl);
   mt_dev_if_pre_uinit(impl);
-  mt_rss_uinit(impl);
   mt_rsq_uinit(impl);
   mt_tsq_uinit(impl);
   mt_srss_uinit(impl);
@@ -285,13 +254,11 @@ static int mt_user_params_check(struct mtl_init_params* p) {
   uint8_t if_ip[MTL_IP_ADDR_LEN];
   uint8_t if_netmask[MTL_IP_ADDR_LEN];
 
-  /* hdr split queues check */
-  if (p->nb_rx_hdr_split_queues > p->rx_sessions_cnt_max) {
-    err("%s, too large nb_rx_hdr_split_queues %u, max %u\n", __func__,
-        p->nb_rx_hdr_split_queues, p->rx_sessions_cnt_max);
+  /* transport check */
+  if ((p->transport >= MTL_TRANSPORT_TYPE_MAX) || (p->transport < 0)) {
+    err("%s, invalid transport %d\n", __func__, p->transport);
     return -EINVAL;
   }
-
   /* num_ports check */
   if ((num_ports > MTL_PORT_MAX) || (num_ports <= 0)) {
     err("%s, invalid num_ports %d\n", __func__, num_ports);
@@ -497,32 +464,19 @@ mtl_handle mtl_init(struct mtl_init_params* p) {
   impl->lcore_lock_fd = -1;
 
   impl->tasklets_nb_per_sch = p->tasklets_nb_per_sch;
-  if (p->transport == MTL_TRANSPORT_ST2110) {
-    if (p->tx_sessions_cnt_max)
-      impl->user_tx_queues_cnt = RTE_MIN(180, p->tx_sessions_cnt_max);
-    if (p->rx_sessions_cnt_max)
-      impl->user_rx_queues_cnt = RTE_MIN(180, p->rx_sessions_cnt_max);
-  } else if (p->transport == MTL_TRANSPORT_UDP) {
-    if (p->tx_queues_cnt_max)
-      impl->user_tx_queues_cnt = p->tx_queues_cnt_max;
-    else
-      impl->user_tx_queues_cnt = 64;
-    if (p->rx_queues_cnt_max)
-      impl->user_rx_queues_cnt = p->rx_queues_cnt_max;
-    else
-      impl->user_rx_queues_cnt = 64;
-    if (!impl->tasklets_nb_per_sch) {
-      if (p->flags & MTL_FLAG_UDP_LCORE)
-        impl->tasklets_nb_per_sch = impl->user_rx_queues_cnt + 8;
-    }
-  } else {
-    err("%s, invalid transport %d\n", __func__, p->transport);
-    ret = -EINVAL;
-    goto err_exit;
+  if (!impl->tasklets_nb_per_sch) {
+    impl->tasklets_nb_per_sch = 16; /* default 16 */
   }
-  info("%s, max user queues tx %d rx %d, flags 0x%" PRIx64 "\n", __func__,
-       impl->user_tx_queues_cnt, impl->user_rx_queues_cnt,
-       mt_get_user_params(impl)->flags);
+
+  impl->tx_audio_sessions_max_per_sch = p->tx_audio_sessions_max_per_sch;
+  if (!impl->tx_audio_sessions_max_per_sch) {
+    impl->tx_audio_sessions_max_per_sch = 300; /* default 300 */
+  }
+  impl->rx_audio_sessions_max_per_sch = p->rx_audio_sessions_max_per_sch;
+  if (!impl->rx_audio_sessions_max_per_sch) {
+    impl->rx_audio_sessions_max_per_sch = 1000; /* default 1000 */
+  }
+
   impl->pkt_udp_suggest_max_size = MTL_PKT_MAX_RTP_BYTES;
   if (p->pkt_udp_suggest_max_size) {
     if ((p->pkt_udp_suggest_max_size > 1000) &&
@@ -545,11 +499,8 @@ mtl_handle mtl_init(struct mtl_init_params* p) {
     }
   }
   impl->sch_schedule_ns = 200 * NS_PER_US; /* max schedule ns for mt_sleep_ms(0) */
-  if (!impl->tasklets_nb_per_sch) impl->tasklets_nb_per_sch = 16;
 
-  /* init mgr lock for audio and anc */
-  mt_pthread_mutex_init(&impl->tx_a_mgr_mutex, NULL);
-  mt_pthread_mutex_init(&impl->rx_a_mgr_mutex, NULL);
+  /* init mgr lock for anc */
   mt_pthread_mutex_init(&impl->tx_anc_mgr_mutex, NULL);
   mt_pthread_mutex_init(&impl->rx_anc_mgr_mutex, NULL);
 
@@ -584,7 +535,8 @@ mtl_handle mtl_init(struct mtl_init_params* p) {
   }
 
   info("%s, succ, tsc_hz %" PRIu64 "\n", __func__, impl->tsc_hz);
-  info("%s, simd level %s\n", __func__, mtl_get_simd_level_name(mtl_get_simd_level()));
+  info("%s, simd level %s, flags 0x%" PRIx64 "\n", __func__,
+       mtl_get_simd_level_name(mtl_get_simd_level()), p->flags);
   return impl;
 
 err_exit:
@@ -603,8 +555,6 @@ int mtl_uninit(mtl_handle mt) {
 
   _mt_stop(impl);
 
-  st_tx_audio_uinit(impl);
-  st_rx_audio_uinit(impl);
   st_tx_anc_uinit(impl);
   st_rx_anc_uinit(impl);
 
@@ -942,8 +892,6 @@ int mtl_get_cap(mtl_handle mt, struct mtl_cap* cap) {
     return -EIO;
   }
 
-  cap->tx_sessions_cnt_max = impl->user_tx_queues_cnt;
-  cap->rx_sessions_cnt_max = impl->user_rx_queues_cnt;
   cap->dma_dev_cnt_max = impl->dma_mgr.num_dma_dev;
   cap->init_flags = mt_get_user_params(impl)->flags;
   return 0;

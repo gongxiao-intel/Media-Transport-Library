@@ -69,8 +69,6 @@ struct st20r_rx_ops {
   uint8_t num_port;
   /** Pcie BDF path like 0000:af:00.0, should align to BDF of mtl_init */
   char port[MTL_SESSION_PORT_MAX][MTL_PORT_MAX_LEN];
-  /** UDP source port number, leave as 0 to use same port as dst */
-  uint16_t udp_src_port[MTL_SESSION_PORT_MAX];
   /** UDP destination port number */
   uint16_t udp_port[MTL_SESSION_PORT_MAX];
 
@@ -86,6 +84,8 @@ struct st20r_rx_ops {
   enum st_fps fps;
   /** Session resolution format */
   enum st20_fmt fmt;
+  /** interlace or not, false: non-interlaced: true: interlaced */
+  bool interlaced;
   /** 7 bits payload type define in RFC3550 */
   uint8_t payload_type;
   /** flags, value in ST20R_RX_FLAG_* */

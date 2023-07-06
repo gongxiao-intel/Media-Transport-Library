@@ -44,9 +44,10 @@
 #define ST_VIDEO_BPM_SIZE (1260)
 
 /* max tx/rx audio(st_30) sessions */
-#define ST_MAX_TX_AUDIO_SESSIONS (180)
-#define ST_TX_AUDIO_SESSIONS_RING_SIZE (512)
-#define ST_MAX_RX_AUDIO_SESSIONS (180)
+#define ST_SCH_MAX_TX_AUDIO_SESSIONS (512) /* max audio tx sessions per sch lcore */
+#define ST_TX_AUDIO_SESSIONS_RING_SIZE (ST_SCH_MAX_TX_AUDIO_SESSIONS * 2)
+#define ST_SCH_MAX_RX_AUDIO_SESSIONS (512 * 2) /* max audio rx sessions per sch lcore */
+
 /* max tx/rx anc(st_40) sessions */
 #define ST_MAX_TX_ANC_SESSIONS (180)
 #define ST_TX_ANC_SESSIONS_RING_SIZE (512)
@@ -278,6 +279,7 @@ struct st_tx_video_session_impl {
                                                    enum mtl_session_port s_port);
 
   struct st_vsync_info vsync;
+  bool second_field;
 
   struct st20_tx_ops ops;
   char ops_name[ST_MAX_NAME_LEN];
@@ -412,14 +414,14 @@ struct st_rx_video_slot_impl {
   /* payload len for codestream packetization mode */
   uint16_t st22_payload_length;
   uint16_t st22_box_hdr_length;
+  /* timestamp(ST10_TIMESTAMP_FMT_TAI, PTP) value for the first pkt */
+  uint64_t timestamp_first_pkt;
 };
 
 struct st_rx_video_ebu_info {
-  double trs;        /* in ns for of 2 consecutive packets, T-Frame / N-Packets */
-  double tr_offset;  /* in ns, tr offset time of each frame */
-  double frame_time; /* time of the frame in nanoseconds */
-  double frame_time_sampling; /* time of the frame in sampling(90k) */
-  int dropped_results;        /* number of results to drop at the beginning */
+  double trs;          /* in ns for of 2 consecutive packets, T-Frame / N-Packets */
+  double tr_offset;    /* in ns, tr offset time of each frame */
+  int dropped_results; /* number of results to drop at the beginning */
 
   // pass criteria
   uint32_t c_max_narrow_pass;
@@ -576,7 +578,6 @@ struct st_rx_video_session_impl {
   enum mtl_port port_maps[MTL_SESSION_PORT_MAX];
   struct mt_rxq_entry* rxq[MTL_SESSION_PORT_MAX];
   uint16_t port_id[MTL_SESSION_PORT_MAX];
-  uint16_t st20_src_port[MTL_SESSION_PORT_MAX]; /* udp port */
   uint16_t st20_dst_port[MTL_SESSION_PORT_MAX]; /* udp port */
 
   struct st_rx_video_session_handle_impl* st20_handle;
@@ -601,6 +602,8 @@ struct st_rx_video_session_impl {
   int st20_frames_cnt;           /* numbers of frames requested */
   struct st_frame_trans* st20_frames;
   struct st20_pgroup st20_pg;
+  double frame_time;          /* time of the frame in nanoseconds */
+  double frame_time_sampling; /* time of the frame in sampling(90k) */
 
   size_t st20_uframe_size; /* size per user frame */
   struct st20_rx_uframe_pg_meta pg_meta;
@@ -740,7 +743,7 @@ struct st_tx_audio_session_impl {
   bool eth_ipv4_cksum_offload[MTL_SESSION_PORT_MAX];
   struct rte_mbuf* inflight[MTL_SESSION_PORT_MAX];
   int inflight_cnt[MTL_SESSION_PORT_MAX]; /* for stats */
-  struct rte_ring* trans_ring[MTL_SESSION_PORT_MAX];
+  struct mt_u64_fifo* trans_ring[MTL_SESSION_PORT_MAX];
   uint16_t trans_ring_thresh;
   struct rte_mbuf* trans_ring_inflight[MTL_SESSION_PORT_MAX];
   struct rte_ring* packet_ring;
@@ -796,9 +799,9 @@ struct st_tx_audio_sessions_mgr {
   uint16_t port_id[MTL_PORT_MAX];
   struct mt_txq_entry* queue[MTL_PORT_MAX];
 
-  struct st_tx_audio_session_impl* sessions[ST_MAX_TX_AUDIO_SESSIONS];
+  struct st_tx_audio_session_impl* sessions[ST_SCH_MAX_TX_AUDIO_SESSIONS];
   /* protect session, spin(fast) lock as it call from tasklet aslo */
-  rte_spinlock_t mutex[ST_MAX_TX_AUDIO_SESSIONS]; /* protect session */
+  rte_spinlock_t mutex[ST_SCH_MAX_TX_AUDIO_SESSIONS]; /* protect session */
 
   rte_atomic32_t transmitter_started;
 
@@ -868,7 +871,6 @@ struct st_rx_audio_session_impl {
   struct mt_rxq_entry* rxq[MTL_SESSION_PORT_MAX];
   uint16_t port_id[MTL_SESSION_PORT_MAX];
 
-  uint16_t st30_src_port[MTL_SESSION_PORT_MAX]; /* udp port */
   uint16_t st30_dst_port[MTL_SESSION_PORT_MAX]; /* udp port */
 
   struct st_frame_trans* st30_frames;
@@ -911,9 +913,9 @@ struct st_rx_audio_sessions_mgr {
   int max_idx; /* max session index */
   struct mt_sch_tasklet_impl* tasklet;
 
-  struct st_rx_audio_session_impl* sessions[ST_MAX_RX_AUDIO_SESSIONS];
+  struct st_rx_audio_session_impl* sessions[ST_SCH_MAX_RX_AUDIO_SESSIONS];
   /* protect session, spin(fast) lock as it call from tasklet aslo */
-  rte_spinlock_t mutex[ST_MAX_RX_AUDIO_SESSIONS];
+  rte_spinlock_t mutex[ST_SCH_MAX_RX_AUDIO_SESSIONS];
 };
 
 struct st_tx_ancillary_session_pacing {
@@ -1021,7 +1023,6 @@ struct st_rx_ancillary_session_impl {
   uint16_t port_id[MTL_SESSION_PORT_MAX];
   struct rte_ring* packet_ring;
 
-  uint16_t st40_src_port[MTL_SESSION_PORT_MAX]; /* udp port */
   uint16_t st40_dst_port[MTL_SESSION_PORT_MAX]; /* udp port */
 
   int st40_seq_id; /* seq id for each pkt */
@@ -1184,6 +1185,8 @@ struct st22_tx_video_session_handle_impl {
 struct st_tx_audio_session_handle_impl {
   struct mtl_main_impl* parent;
   enum mt_handle_type type;
+  struct mt_sch_impl* sch; /* the sch this session attached */
+  int quota_mbs;           /* data quota for this session */
   struct st_tx_audio_session_impl* impl;
 };
 
@@ -1212,6 +1215,8 @@ struct st22_rx_video_session_handle_impl {
 struct st_rx_audio_session_handle_impl {
   struct mtl_main_impl* parent;
   enum mt_handle_type type;
+  struct mt_sch_impl* sch; /* the sch this session attached */
+  int quota_mbs;           /* data quota for this session */
   struct st_rx_audio_session_impl* impl;
 };
 

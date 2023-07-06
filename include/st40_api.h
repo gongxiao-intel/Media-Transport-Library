@@ -299,8 +299,6 @@ struct st40_rx_ops {
   uint8_t num_port;
   /** Pcie BDF path like 0000:af:00.0, should align to BDF of mtl_init */
   char port[MTL_SESSION_PORT_MAX][MTL_PORT_MAX_LEN];
-  /** UDP source port number, leave as 0 to use same port as dst */
-  uint16_t udp_src_port[MTL_SESSION_PORT_MAX];
   /** UDP destination port number */
   uint16_t udp_port[MTL_SESSION_PORT_MAX];
   /** flags, value in ST40_RX_FLAG_* */
@@ -342,6 +340,19 @@ st40_tx_handle st40_tx_create(mtl_handle mt, struct st40_tx_ops* ops);
  *   - <0: Error code of the tx st2110-40(ancillary) session free.
  */
 int st40_tx_free(st40_tx_handle handle);
+
+/**
+ * Online update the destination info for the tx st2110-40(ancillary) session.
+ *
+ * @param handle
+ *   The handle to the tx st2110-40(ancillary) session.
+ * @param dst
+ *   The pointer to the tx st2110-40(ancillary) destination info.
+ * @return
+ *   - 0: Success, tx st2110-40(ancillary) session destination update succ.
+ *   - <0: Error code of the rx st2110-40(ancillary) session destination update.
+ */
+int st40_tx_update_destination(st40_tx_handle handle, struct st_tx_dest_info* dst);
 
 /**
  * Get the framebuffer pointer from the tx st2110-40(ancillary) session.

@@ -334,7 +334,7 @@ static int video_trs_tsc_tasklet(struct mtl_main_impl* impl,
 
   /* check valid bulk */
   int valid_bulk = bulk;
-  uint32_t pkt_idx;
+  uint32_t pkt_idx = 0;
   for (int i = 0; i < bulk; i++) {
     pkt_idx = st_tx_mbuf_get_idx(pkts[i]);
     if (pkt_idx == ST_TX_DUMMY_PKT_IDX) {
@@ -414,7 +414,7 @@ static int video_trs_launch_time_tasklet(struct mtl_main_impl* impl,
   struct mt_ptp_impl* ptp = mt_get_ptp(impl, port_id);
   
   if (!ptp->phc2sys.stat_sync) {
-    return MT_TASKLET_HAS_PENDING;
+    return MT_TASKLET_ALL_DONE;
   }
 
   /* check if any inflight pkts in transmitter */
