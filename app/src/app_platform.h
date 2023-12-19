@@ -31,6 +31,10 @@
 #include <signal.h>
 #include <stdio.h>
 
+#ifdef APP_HAS_SSL
+#include <openssl/sha.h>
+#endif
+
 #ifndef __FAVOR_BSD
 #define __FAVOR_BSD
 #endif
@@ -50,6 +54,10 @@
 typedef unsigned long int nfds_t;
 #endif
 
+#ifdef WINDOWSENV
+#define strdup(p) _strdup(p)
+#endif
+
 enum st_tx_frame_status {
   ST_TX_FRAME_FREE = 0,
   ST_TX_FRAME_READY,
@@ -57,17 +65,23 @@ enum st_tx_frame_status {
   ST_TX_FRAME_STATUS_MAX,
 };
 
+#ifndef SHA256_DIGEST_LENGTH
+#define SHA256_DIGEST_LENGTH 32
+#endif
+
 struct st_tx_frame {
   enum st_tx_frame_status stat;
   size_t size;
   bool second_field;    /* for interlaced mode */
   bool slice_trigger;   /* for slice */
   uint16_t lines_ready; /* for slice */
+  uint8_t shas[SHA256_DIGEST_LENGTH];
 };
 
 struct st_rx_frame {
   void* frame;
   size_t size;
+  uint8_t shas[SHA256_DIGEST_LENGTH];
 };
 
 static inline int st_pthread_mutex_init(pthread_mutex_t* mutex,
@@ -146,20 +160,27 @@ static inline void st_usleep(
 #endif
 }
 
-static inline void st_getrealtime(struct timespec* pspec) {
-#ifdef WINDOWSENV
-  unsigned __int64 t;
-  union {
-    unsigned __int64 u64;
-    FILETIME ft;
-  } ct;
-  GetSystemTimePreciseAsFileTime(&ct.ft);
-  t = ct.u64 - INT64_C(116444736000000000);
-  pspec->tv_sec = t / 10000000;
-  pspec->tv_nsec = ((int)(t % 10000000)) * 100;
-#else
-  clock_gettime(CLOCK_REALTIME, pspec);
-#endif
+static inline int st_get_real_time(struct timespec* ts) {
+  return clock_gettime(CLOCK_REALTIME, ts);
 }
+
+static inline int st_set_real_time(struct timespec* ts) {
+  return clock_settime(CLOCK_REALTIME, ts);
+}
+
+#ifdef APP_HAS_SSL
+static inline unsigned char* st_sha256(const unsigned char* d, size_t n,
+                                       unsigned char* md) {
+  return SHA256(d, n, md);
+}
+#else
+static inline unsigned char* st_sha256(const unsigned char* d, size_t n,
+                                       unsigned char* md) {
+  MTL_MAY_UNUSED(d);
+  MTL_MAY_UNUSED(n);
+  md[0] = rand();
+  return NULL;
+}
+#endif
 
 #endif

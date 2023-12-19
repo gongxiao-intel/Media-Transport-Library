@@ -59,7 +59,7 @@ static void* tx_st20p_fwd_thread(void* args) {
   struct merge_fwd_sample_ctx* s = args;
   st20p_tx_handle tx_handle = s->tx_handle;
   struct st_frame* frame;
-  struct st_frame down_frame; /* empty temp frame*/
+  struct st_frame down_frame = {0}; /* empty temp frame*/
 
   /* in case when timestamp mismatch */
   struct st_frame* rx_restore_frame = NULL;
@@ -193,8 +193,8 @@ int main(int argc, char** argv) {
   ops_tx.port.num_port = 1;
   memcpy(ops_tx.port.dip_addr[MTL_SESSION_PORT_P], ctx.fwd_dip_addr[MTL_PORT_P],
          MTL_IP_ADDR_LEN);
-  strncpy(ops_tx.port.port[MTL_SESSION_PORT_P], ctx.param.port[MTL_PORT_P],
-          MTL_PORT_MAX_LEN);
+  snprintf(ops_tx.port.port[MTL_SESSION_PORT_P], MTL_PORT_MAX_LEN, "%s",
+           ctx.param.port[MTL_PORT_P]);
   ops_tx.port.udp_port[MTL_SESSION_PORT_P] = ctx.udp_port;
   ops_tx.port.payload_type = ctx.payload_type;
   ops_tx.width = ctx.width;
@@ -227,9 +227,9 @@ int main(int argc, char** argv) {
     ops_rx.port.num_port = 1;
     memcpy(ops_rx.port.sip_addr[MTL_SESSION_PORT_P], ctx.rx_sip_addr[MTL_PORT_P],
            MTL_IP_ADDR_LEN);
-    strncpy(ops_rx.port.port[MTL_SESSION_PORT_P], ctx.param.port[MTL_PORT_P],
-            MTL_PORT_MAX_LEN);
-    ops_rx.port.udp_port[MTL_SESSION_PORT_P] = ctx.udp_port + i;
+    snprintf(ops_rx.port.port[MTL_SESSION_PORT_P], MTL_PORT_MAX_LEN, "%s",
+             ctx.param.port[MTL_PORT_P]);
+    ops_rx.port.udp_port[MTL_SESSION_PORT_P] = ctx.udp_port + i * 2;
     ops_rx.port.payload_type = ctx.payload_type;
     ops_rx.width = ctx.width;
     ops_rx.height = ctx.height;

@@ -34,6 +34,7 @@ enum test_args_cmd {
   TEST_ARG_START_QUEUE,
   TEST_ARG_P_START_QUEUE,
   TEST_ARG_R_START_QUEUE,
+  TEST_ARG_QUEUE_CNT,
   TEST_ARG_HDR_SPLIT,
   TEST_ARG_TASKLET_THREAD,
   TEST_ARG_TSC_PACING,
@@ -68,6 +69,7 @@ static struct option test_args_options[] = {
     {"auto_start_stop", no_argument, 0, TEST_ARG_AUTO_START_STOP},
     {"afxdp_zc_disable", no_argument, 0, TEST_ARG_AF_XDP_ZC_DISABLE},
     {"start_queue", required_argument, 0, TEST_ARG_START_QUEUE},
+    {"queue_cnt", required_argument, 0, TEST_ARG_QUEUE_CNT},
     {"p_start_queue", required_argument, 0, TEST_ARG_P_START_QUEUE},
     {"r_start_queue", required_argument, 0, TEST_ARG_R_START_QUEUE},
     {"hdr_split", no_argument, 0, TEST_ARG_HDR_SPLIT},
@@ -92,13 +94,13 @@ struct st_tests_context* st_test_ctx(void) {
 static int test_args_dma_dev(struct mtl_init_params* p, const char* in_dev) {
   if (!in_dev) return -EIO;
   char devs[128] = {0};
-  strncpy(devs, in_dev, 128 - 1);
+  snprintf(devs, 128 - 1, "%s", in_dev);
 
   dbg("%s, dev list %s\n", __func__, devs);
   char* next_dev = strtok(devs, ",");
   while (next_dev && (p->num_dma_dev_port < MTL_DMA_DEV_MAX)) {
     dbg("next_dev: %s\n", next_dev);
-    strncpy(p->dma_dev_port[p->num_dma_dev_port], next_dev, MTL_PORT_MAX_LEN - 1);
+    snprintf(p->dma_dev_port[p->num_dma_dev_port], MTL_PORT_MAX_LEN - 1, "%s", next_dev);
     p->num_dma_dev_port++;
     next_dev = strtok(NULL, ",");
   }
@@ -208,6 +210,14 @@ static int test_parse_args(struct st_tests_context* ctx, struct mtl_init_params*
       case TEST_ARG_R_START_QUEUE:
         p->xdp_info[MTL_PORT_R].start_queue = atoi(optarg);
         break;
+      case TEST_ARG_QUEUE_CNT: {
+        uint16_t cnt = atoi(optarg);
+        p->tx_queues_cnt[MTL_PORT_P] = cnt;
+        p->tx_queues_cnt[MTL_PORT_R] = cnt;
+        p->rx_queues_cnt[MTL_PORT_P] = cnt;
+        p->rx_queues_cnt[MTL_PORT_R] = cnt;
+        break;
+      }
       case TEST_ARG_HDR_SPLIT:
         ctx->hdr_split = true;
         break;
@@ -384,7 +394,7 @@ static void test_ctx_uinit(struct st_tests_context* ctx) {
 
 TEST(Misc, version) {
   auto version_display = mtl_version();
-  info("st version: %s\n", version_display);
+  info("MTL version: %s\n", version_display);
 
   uint32_t version_no =
       MTL_VERSION_NUM(MTL_VERSION_MAJOR, MTL_VERSION_MINOR, MTL_VERSION_LAST);
@@ -473,7 +483,6 @@ TEST(Misc, hp_malloc_expect_fail) {
   int num_port = st_test_num_port(ctx);
 
   hp_malloc_test(ctx, 0, MTL_PORT_P, false, false);
-  hp_malloc_test(ctx, 8, MTL_PORT_MAX, false, false);
   if (num_port > 1) hp_malloc_test(ctx, 0, MTL_PORT_R, false, false);
 }
 
@@ -482,7 +491,6 @@ TEST(Misc, hp_zmalloc_expect_fail) {
   int num_port = st_test_num_port(ctx);
 
   hp_malloc_test(ctx, 0, MTL_PORT_P, true, false);
-  hp_malloc_test(ctx, 8, MTL_PORT_MAX, true, false);
   if (num_port > 1) hp_malloc_test(ctx, 0, MTL_PORT_R, true, false);
 }
 
@@ -507,6 +515,20 @@ TEST(Misc, ptp) {
       diff = real_time - ptp;
     EXPECT_LT(diff, NS_PER_US * 5);
   }
+}
+
+TEST(Misc, log_level) {
+  auto ctx = (struct st_tests_context*)st_test_ctx();
+  auto handle = ctx->handle;
+  int ret;
+
+  enum mtl_log_level orig_level = mtl_get_log_level(handle);
+  ret = mtl_set_log_level(handle, MTL_LOG_LEVEL_INFO);
+  EXPECT_GE(ret, 0);
+  ret = mtl_set_log_level(handle, MTL_LOG_LEVEL_ERROR);
+  EXPECT_GE(ret, 0);
+  ret = mtl_set_log_level(handle, orig_level);
+  EXPECT_GE(ret, 0);
 }
 
 static void st10_timestamp_test(uint32_t sampling_rate) {
@@ -556,9 +578,7 @@ GTEST_API_ int main(int argc, char** argv) {
   for (int i = 0; i < ctx->para.num_ports; i++) {
     ctx->para.pmd[i] = mtl_pmd_by_port_name(ctx->para.port[i]);
     if (ctx->para.pmd[i] != MTL_PMD_DPDK_USER) {
-      mtl_get_if_ip(ctx->para.port[i], ctx->para.sip_addr[i], ctx->para.netmask[i]);
       ctx->para.flags |= MTL_FLAG_RX_SEPARATE_VIDEO_LCORE;
-      ctx->para.xdp_info[i].queue_count = 8;
     } else {
       link_flap_wa = true;
     }
@@ -573,11 +593,18 @@ GTEST_API_ int main(int argc, char** argv) {
     return -EIO;
   }
 
-  if (ctx->dhcp) {
-    for (int i = 0; i < ctx->para.num_ports; i++) {
-      /* get the assigned dhcp ip */
-      mtl_port_ip_info(ctx->handle, (enum mtl_port)i, ctx->para.sip_addr[i],
-                       ctx->para.netmask[i], ctx->para.gateway[i]);
+  for (int i = 0; i < ctx->para.num_ports; i++) {
+    mtl_port_ip_info(ctx->handle, (enum mtl_port)i, ctx->para.sip_addr[i],
+                     ctx->para.netmask[i], ctx->para.gateway[i]);
+    uint8_t* ip = ctx->para.sip_addr[i];
+    info("%s, if ip %u.%u.%u.%u for port %s\n", __func__, ip[0], ip[1], ip[2], ip[3],
+         ctx->para.port[i]);
+  }
+
+  if (ctx->para.num_ports > 1) {
+    if (0 == strcmp(ctx->para.port[MTL_PORT_P], ctx->para.port[MTL_PORT_R])) {
+      /* for test with --p_port kernel:lo --r_port kernel:lo */
+      ctx->same_dual_port = true;
     }
   }
 
@@ -643,7 +670,7 @@ void sha_frame_check(void* args) {
       }
       if (i >= TEST_SHA_HIST_NUM) {
         test_sha_dump("rx_error_sha", result);
-        ctx->fail_cnt++;
+        ctx->sha_fail_cnt++;
       }
       ctx->check_sha_frame_cnt++;
       st_test_free(frame);

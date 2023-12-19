@@ -35,6 +35,10 @@ static int rx_st20p_frame_available(void* priv) {
 }
 
 static int rx_st20p_close_source(struct rx_st20p_sample_ctx* s) {
+  if (s->dst_begin) {
+    munmap(s->dst_begin, s->dst_end - s->dst_begin);
+    s->dst_begin = NULL;
+  }
   if (s->dst_fd >= 0) {
     close(s->dst_fd);
     s->dst_fd = 0;
@@ -103,6 +107,15 @@ static void* rx_st20p_frame_thread(void* arg) {
       st_pthread_mutex_unlock(&s->wake_mutex);
       continue;
     }
+    dbg("%s(%d), one new frame\n", __func__, s->idx);
+    if (frame->user_meta) {
+      const struct st_frame_user_meta* user_meta = frame->user_meta;
+      if (frame->user_meta_size != sizeof(*user_meta)) {
+        err("%s(%d), user_meta_size wrong\n", __func__, s->idx);
+      }
+      info("%s(%d), user_meta %d %s\n", __func__, s->idx, user_meta->idx,
+           user_meta->dummy);
+    }
     rx_st20p_consume_frame(s, frame);
     st20p_rx_put_frame(handle, frame);
   }
@@ -152,9 +165,9 @@ int main(int argc, char** argv) {
     ops_rx.port.num_port = 1;
     memcpy(ops_rx.port.sip_addr[MTL_SESSION_PORT_P], ctx.rx_sip_addr[MTL_PORT_P],
            MTL_IP_ADDR_LEN);
-    strncpy(ops_rx.port.port[MTL_SESSION_PORT_P], ctx.param.port[MTL_PORT_P],
-            MTL_PORT_MAX_LEN);
-    ops_rx.port.udp_port[MTL_SESSION_PORT_P] = ctx.udp_port + i;
+    snprintf(ops_rx.port.port[MTL_SESSION_PORT_P], MTL_PORT_MAX_LEN, "%s",
+             ctx.param.port[MTL_PORT_P]);
+    ops_rx.port.udp_port[MTL_SESSION_PORT_P] = ctx.udp_port + i * 2;
     ops_rx.port.payload_type = ctx.payload_type;
     ops_rx.width = ctx.width;
     ops_rx.height = ctx.height;
@@ -175,6 +188,7 @@ int main(int argc, char** argv) {
     app[i]->handle = rx_handle;
 
     app[i]->frame_size = st20p_rx_frame_size(rx_handle);
+    info("%s(%d), frame_size %" PRId64 "\n", __func__, i, app[i]->frame_size);
     if (ctx.rx_dump) {
       ret = rx_st20p_open_source(app[i], ctx.rx_url);
       if (ret < 0) {

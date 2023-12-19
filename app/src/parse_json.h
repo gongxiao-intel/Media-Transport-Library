@@ -28,12 +28,6 @@ enum return_type {
   ST_JSON_MAX,
 };
 
-enum pacing {
-  PACING_GAP,
-  PACING_LINEAR,
-  PACING_MAX,
-};
-
 enum tr_offset {
   TR_OFFSET_DEFAULT,
   TR_OFFSET_NONE,
@@ -52,7 +46,9 @@ enum video_format {
   VIDEO_FORMAT_720P_30FPS,
   VIDEO_FORMAT_720P_24FPS,
   VIDEO_FORMAT_720P_23FPS,
+  VIDEO_FORMAT_1080P_120FPS,
   VIDEO_FORMAT_1080P_119FPS,
+  VIDEO_FORMAT_1080P_100FPS,
   VIDEO_FORMAT_1080P_59FPS,
   VIDEO_FORMAT_1080P_50FPS,
   VIDEO_FORMAT_1080P_29FPS,
@@ -124,6 +120,12 @@ typedef struct st_json_interface {
   uint8_t gateway[MTL_IP_ADDR_LEN];
   uint16_t tx_queues_cnt;
   uint16_t rx_queues_cnt;
+  int tx_video_sessions_cnt; /* st20/st22/st20p/st22p on interface level */
+  int rx_video_sessions_cnt; /* st20/st22/st20p/st22p on interface level */
+  int tx_audio_sessions_cnt; /* st30 on interface level */
+  int rx_audio_sessions_cnt; /* st30 on interface level */
+  int tx_anc_sessions_cnt;   /* st40 on interface level */
+  int rx_anc_sessions_cnt;   /* st40 on interface level */
 } st_json_interface_t;
 
 enum st_json_ip_type {
@@ -134,6 +136,7 @@ enum st_json_ip_type {
 
 typedef struct st_json_session_base {
   uint8_t ip[MTL_SESSION_PORT_MAX][MTL_IP_ADDR_LEN];
+  uint8_t mcast_src_ip[MTL_SESSION_PORT_MAX][MTL_IP_ADDR_LEN];
   st_json_interface_t* inf[MTL_SESSION_PORT_MAX];
   int num_inf;
   uint16_t udp_port;
@@ -146,7 +149,7 @@ typedef struct st_json_session_base {
 
 typedef struct st_json_video_info {
   enum video_format video_format;
-  enum pacing pacing;
+  enum st21_pacing pacing;
   enum st20_type type;
   enum st20_packing packing;
   enum tr_offset tr_offset;
@@ -175,10 +178,11 @@ typedef struct st_json_ancillary_info {
 
 typedef struct st_json_st22p_info {
   enum st_frame_fmt format;
-  enum pacing pacing;
+  enum st21_pacing pacing;
   uint32_t width;
   uint32_t height;
   enum st_fps fps;
+  bool interlaced;
   enum st_plugin_device device;
   enum st22_codec codec;
   enum st22_pack_type pack_type;
@@ -191,7 +195,8 @@ typedef struct st_json_st22p_info {
 typedef struct st_json_st20p_info {
   enum st_frame_fmt format;
   enum st20_fmt transport_format;
-  enum pacing pacing;
+  enum st21_pacing transport_pacing;
+  enum st20_packing transport_packing;
   uint32_t width;
   uint32_t height;
   enum st_fps fps;
@@ -205,6 +210,7 @@ typedef struct st_json_video_session {
   st_json_video_info_t info;
 
   bool display;
+  bool enable_rtcp;
 
   /* rx only items */
   enum user_pg_fmt user_pg_format;
@@ -214,11 +220,15 @@ typedef struct st_json_video_session {
 typedef struct st_json_audio_session {
   st_json_session_base_t base;
   st_json_audio_info_t info;
+
+  bool enable_rtcp;
 } st_json_audio_session_t;
 
 typedef struct st_json_ancillary_session {
   st_json_session_base_t base;
   st_json_ancillary_info_t info;
+
+  bool enable_rtcp;
 } st_json_ancillary_session_t;
 
 typedef struct st_json_st22p_session {
@@ -227,6 +237,7 @@ typedef struct st_json_st22p_session {
 
   bool display;
   bool measure_latency;
+  bool enable_rtcp;
 } st_json_st22p_session_t;
 
 typedef struct st_json_st20p_session {
@@ -235,6 +246,7 @@ typedef struct st_json_st20p_session {
 
   bool display;
   bool measure_latency;
+  bool enable_rtcp;
 } st_json_st20p_session_t;
 
 typedef struct st_json_context {
@@ -248,6 +260,7 @@ typedef struct st_json_context {
   bool shared_tx_queues;
   bool shared_rx_queues;
   bool tx_no_chain;
+  char* log_file;
 
   st_json_video_session_t* tx_video_sessions;
   int tx_video_session_cnt;

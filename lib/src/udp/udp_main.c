@@ -13,6 +13,11 @@
 #define UDP_SEGMENT 103 /* Set GSO segmentation size */
 #endif
 
+#ifndef SO_COOKIE
+/* fix for centos 7 build */
+#define SO_COOKIE 57
+#endif
+
 static inline void udp_set_flag(struct mudp_impl* s, uint32_t flag) { s->flags |= flag; }
 
 static inline void udp_clear_flag(struct mudp_impl* s, uint32_t flag) {
@@ -28,6 +33,13 @@ static inline bool udp_get_flag(struct mudp_impl* s, uint32_t flag) {
 
 static inline bool udp_alive(struct mudp_impl* s) {
   if (!mt_aborted(s->parent) && s->alive)
+    return true;
+  else
+    return false;
+}
+
+static inline bool udp_is_fallback(struct mudp_impl* s) {
+  if (s->fallback_fd >= 0)
     return true;
   else
     return false;
@@ -105,6 +117,8 @@ static int udp_verify_sendto_args(size_t len, int flags, const struct sockaddr_i
 }
 
 static int udp_verify_poll(struct mudp_pollfd* fds, mudp_nfds_t nfds, int timeout) {
+  MTL_MAY_UNUSED(timeout);
+
   if (!fds) {
     err("%s, NULL fds\n", __func__);
     MUDP_ERR_RET(EINVAL);
@@ -149,19 +163,17 @@ static int udp_build_tx_pkt(struct mtl_main_impl* impl, struct mudp_impl* s,
   if (udp_get_flag(s, MUDP_TX_USER_MAC)) {
     rte_memcpy(d_addr->addr_bytes, s->user_mac, RTE_ETHER_ADDR_LEN);
   } else {
-    ret = mt_dev_dst_ip_mac(impl, dip, d_addr, port, arp_timeout_ms);
+    ret = mt_dst_ip_mac(impl, dip, d_addr, port, arp_timeout_ms);
     if (ret < 0) {
       if (arp_timeout_ms) /* log only if not zero timeout */
-        err("%s(%d), mt_dev_dst_ip_mac fail %d for %u.%u.%u.%u\n", __func__, idx, ret,
-            dip[0], dip[1], dip[2], dip[3]);
+        err("%s(%d), mt_dst_ip_mac fail %d for %u.%u.%u.%u\n", __func__, idx, ret, dip[0],
+            dip[1], dip[2], dip[3]);
       s->stat_pkt_arp_fail++;
       MUDP_ERR_RET(EIO);
     }
   }
 
   /* ip */
-  ipv4->packet_id = htons(s->ipv4_packet_id);
-  s->ipv4_packet_id++;
   mtl_memcpy(&ipv4->dst_addr, dip, MTL_IP_ADDR_LEN);
 
   /* udp */
@@ -238,11 +250,11 @@ static int udp_build_tx_msg_pkt(struct mtl_main_impl* impl, struct mudp_impl* s,
   if (udp_get_flag(s, MUDP_TX_USER_MAC)) {
     rte_memcpy(&d_addr.addr_bytes, s->user_mac, RTE_ETHER_ADDR_LEN);
   } else {
-    ret = mt_dev_dst_ip_mac(impl, dip, &d_addr, port, arp_timeout_ms);
+    ret = mt_dst_ip_mac(impl, dip, &d_addr, port, arp_timeout_ms);
     if (ret < 0) {
       if (arp_timeout_ms) /* log only if not zero timeout */
-        err("%s(%d), mt_dev_dst_ip_mac fail %d for %u.%u.%u.%u\n", __func__, idx, ret,
-            dip[0], dip[1], dip[2], dip[3]);
+        err("%s(%d), mt_dst_ip_mac fail %d for %u.%u.%u.%u\n", __func__, idx, ret, dip[0],
+            dip[1], dip[2], dip[3]);
       s->stat_pkt_arp_fail++;
       MUDP_ERR_RET(EIO);
     }
@@ -262,8 +274,6 @@ static int udp_build_tx_msg_pkt(struct mtl_main_impl* impl, struct mudp_impl* s,
     /* update dst mac */
     rte_memcpy(mt_eth_d_addr(eth), &d_addr, sizeof(d_addr));
     /* ip */
-    ipv4->packet_id = htons(s->ipv4_packet_id);
-    s->ipv4_packet_id++;
     mtl_memcpy(&ipv4->dst_addr, dip, MTL_IP_ADDR_LEN);
     /* udp */
     udp->dst_port = addr_in->sin_port;
@@ -391,9 +401,9 @@ static int udp_init_hdr(struct mtl_main_impl* impl, struct mudp_impl* s) {
 
   /* eth */
   memset(eth, 0x0, sizeof(*eth));
-  ret = rte_eth_macaddr_get(mt_port_id(impl, port), mt_eth_s_addr(eth));
+  ret = mt_macaddr_get(impl, port, mt_eth_s_addr(eth));
   if (ret < 0) {
-    err("%s(%d), rte_eth_macaddr_get fail %d for port %d\n", __func__, idx, ret, port);
+    err("%s(%d), macaddr get fail %d for port %d\n", __func__, idx, ret, port);
     return ret;
   }
   eth->ether_type = htons(RTE_ETHER_TYPE_IPV4);
@@ -477,7 +487,7 @@ static int udp_init_txq(struct mtl_main_impl* impl, struct mudp_impl* s,
   return 0;
 }
 
-static int udp_uinit_rxq(struct mtl_main_impl* impl, struct mudp_impl* s) {
+static int udp_uinit_rxq(struct mudp_impl* s) {
   if (s->rxq) {
     mur_client_put(s->rxq);
     s->rxq = NULL;
@@ -705,9 +715,6 @@ static int udp_set_reuse_port(struct mudp_impl* s, const void* optval, socklen_t
   reuse_port = *((int*)optval);
   info("%s(%d), reuse_port %d\n", __func__, idx, reuse_port);
   s->reuse_port = reuse_port;
-  if (s->rxq) {
-    mur_client_set_reuse(s->rxq, reuse_port);
-  }
   return 0;
 }
 
@@ -772,7 +779,7 @@ static int udp_init_mcast(struct mtl_main_impl* impl, struct mudp_impl* s) {
   return 0;
 }
 
-static int udp_uinit_mcast(struct mtl_main_impl* impl, struct mudp_impl* s) {
+static int udp_uinit_mcast(struct mudp_impl* s) {
   int idx = s->idx;
 
   if (!s->mcast_addrs) {
@@ -819,7 +826,7 @@ static int udp_add_membership(struct mudp_impl* s, const void* optval, socklen_t
   mreq = (const struct ip_mreq*)optval;
   ip = (uint8_t*)&mreq->imr_multiaddr.s_addr;
   uint32_t group_addr = mt_ip_to_u32(ip);
-  ret = mt_mcast_join(s->parent, group_addr, port);
+  ret = mt_mcast_join(s->parent, group_addr, 0, port);
   if (ret < 0) {
     err("%s(%d), join mcast fail\n", __func__, idx);
     return ret;
@@ -839,7 +846,7 @@ static int udp_add_membership(struct mudp_impl* s, const void* optval, socklen_t
   mt_pthread_mutex_unlock(&s->mcast_addrs_mutex);
   if (!added) {
     err("%s(%d), record mcast fail\n", __func__, idx);
-    mt_mcast_leave(s->parent, group_addr, port);
+    mt_mcast_leave(s->parent, group_addr, 0, port);
     MUDP_ERR_RET(EIO);
   }
 
@@ -884,7 +891,7 @@ static int udp_drop_membership(struct mudp_impl* s, const void* optval,
     MUDP_ERR_RET(EIO);
   }
 
-  mt_mcast_leave(s->parent, group_addr, port);
+  mt_mcast_leave(s->parent, group_addr, 0, port);
   return 0;
 }
 
@@ -894,6 +901,7 @@ static ssize_t udp_rx_dequeue(struct mudp_impl* s, void* buf, size_t len, int fl
   int ret;
   ssize_t copied = 0;
   struct rte_mbuf* pkt = NULL;
+  MTL_MAY_UNUSED(flags);
 
   /* dequeue pkt from rx ring */
   ret = rte_ring_sc_dequeue(mur_client_ring(s->rxq), (void**)&pkt);
@@ -932,7 +940,8 @@ static ssize_t udp_rx_dequeue(struct mudp_impl* s, void* buf, size_t len, int fl
   return copied;
 }
 
-static ssize_t udp_rx_ret_timeout(struct mudp_impl* s) {
+static ssize_t udp_rx_ret_timeout(struct mudp_impl* s, int flags) {
+  MTL_MAY_UNUSED(flags);
   if (s->rx_timeout_us) {
     dbg("%s(%d), timeout to %d ms, flags %d\n", __func__, s->idx, s->rx_timeout_us,
         flags);
@@ -973,7 +982,7 @@ dequeue:
     goto dequeue;
   }
 
-  return udp_rx_ret_timeout(s);
+  return udp_rx_ret_timeout(s, flags);
 }
 
 static ssize_t udp_rx_msg_dequeue(struct mudp_impl* s, struct msghdr* msg, int flags) {
@@ -981,6 +990,7 @@ static ssize_t udp_rx_msg_dequeue(struct mudp_impl* s, struct msghdr* msg, int f
   int ret;
   ssize_t copied = 0;
   struct rte_mbuf* pkt = NULL;
+  MTL_MAY_UNUSED(flags);
 
   /* dequeue pkt from rx ring */
   ret = rte_ring_sc_dequeue(mur_client_ring(s->rxq), (void**)&pkt);
@@ -1072,7 +1082,40 @@ dequeue:
   }
 
   s->stat_rx_msg_timeout_cnt++;
-  return udp_rx_ret_timeout(s);
+  return udp_rx_ret_timeout(s, flags);
+}
+
+static int udp_fallback_poll(struct mudp_pollfd* fds, mudp_nfds_t nfds, int timeout) {
+  struct mudp_impl* s;
+  struct pollfd p_fds[nfds];
+  int ret;
+
+  dbg("%s(%d), nfds %d timeout %d\n", __func__, s->idx, (int)nfds, timeout);
+  for (mudp_nfds_t i = 0; i < nfds; i++) {
+    s = fds[i].fd;
+
+    if (!udp_is_fallback(s)) {
+      err("%s(%d), it's not a fallback fd\n", __func__, s->idx);
+      return -EIO;
+    }
+    p_fds[i].fd = s->fallback_fd;
+    p_fds[i].events = fds[i].events;
+    p_fds[i].revents = fds[i].revents;
+  }
+
+#ifdef WINDOWSENV
+  MTL_MAY_UNUSED(timeout);
+  ret = -EIO;
+  err("%s(%d), not support on this platform\n", __func__, s->idx);
+#else
+  ret = poll(p_fds, nfds, timeout);
+#endif
+
+  for (mudp_nfds_t i = 0; i < nfds; i++) {
+    fds[i].revents = p_fds[i].revents;
+  }
+
+  return ret;
 }
 
 static int udp_poll(struct mudp_pollfd* fds, mudp_nfds_t nfds, int timeout,
@@ -1080,11 +1123,24 @@ static int udp_poll(struct mudp_pollfd* fds, mudp_nfds_t nfds, int timeout,
   struct mudp_impl* s = fds[0].fd;
   struct mtl_main_impl* impl = s->parent;
   uint64_t start_ts = mt_get_tsc(impl);
-  int rc;
+  int rc, ret;
 
   dbg("%s(%d), nfds %d timeout %d\n", __func__, s->idx, (int)nfds, timeout);
   for (mudp_nfds_t i = 0; i < nfds; i++) {
     s = fds[i].fd;
+
+    if (udp_is_fallback(s)) {
+      err("%s(%d), it's backed by a fallback fd\n", __func__, s->idx);
+      return -EIO;
+    }
+
+    if (!s->rxq) {
+      ret = udp_init_rxq(impl, s);
+      if (ret < 0) {
+        err("%s(%d), init rxq fail\n", __func__, s->idx);
+        return ret;
+      }
+    }
     s->stat_poll_cnt++;
   }
 
@@ -1172,8 +1228,8 @@ mudp_handle mudp_socket_port(mtl_handle mt, int domain, int type, int protocol,
   s->element_nb = mt_if_nb_tx_desc(impl, port) + 512;
   s->element_size = MUDP_MAX_BYTES;
   /* No dependency to arp for kernel based udp stack */
-  s->arp_timeout_us = MT_DEV_TIMEOUT_ZERO;
-  s->msg_arp_timeout_us = MT_DEV_TIMEOUT_ZERO;
+  s->arp_timeout_us = MT_TIMEOUT_ZERO;
+  s->msg_arp_timeout_us = MT_TIMEOUT_ZERO;
   s->tx_timeout_us = 10 * US_PER_MS;
   s->rx_timeout_us = 0;
   s->txq_bps = MUDP_DEFAULT_RL_BPS;
@@ -1186,7 +1242,20 @@ mudp_handle mudp_socket_port(mtl_handle mt, int domain, int type, int protocol,
   s->cookie = idx;
   s->mcast_addrs_nb = 16; /* max 16 mcast address */
   s->gso_segment_sz = MUDP_MAX_BYTES;
+  s->fallback_fd = -1;
   mt_pthread_mutex_init(&s->mcast_addrs_mutex, NULL);
+
+  if (mt_pmd_is_kernel_socket(impl, port)) {
+    ret = socket(domain, type, protocol);
+    if (ret < 0) {
+      err("%s(%d), fall back to socket fail %d\n", __func__, idx, ret);
+      mudp_close(s);
+      return NULL;
+    }
+    s->fallback_fd = ret;
+    info("%s(%d), fall back to socket fd %d\n", __func__, idx, s->fallback_fd);
+    goto succ;
+  }
 
   ret = udp_init_hdr(impl, s);
   if (ret < 0) {
@@ -1205,6 +1274,7 @@ mudp_handle mudp_socket_port(mtl_handle mt, int domain, int type, int protocol,
     return NULL;
   }
 
+succ:
   s->alive = true;
   info("%s(%d), succ, socket %p\n", __func__, idx, s);
   return s;
@@ -1226,12 +1296,17 @@ int mudp_close(mudp_handle ut) {
 
   s->alive = false;
 
+  if (s->fallback_fd >= 0) {
+    close(s->fallback_fd);
+    s->fallback_fd = -1;
+  }
+
   mt_stat_unregister(impl, udp_stat_dump, s);
   udp_stat_dump(s);
 
   udp_uinit_txq(impl, s);
-  udp_uinit_rxq(impl, s);
-  udp_uinit_mcast(impl, s);
+  udp_uinit_rxq(s);
+  udp_uinit_mcast(s);
 
   mt_pthread_mutex_destroy(&s->mcast_addrs_mutex);
   mt_rte_free(s);
@@ -1251,11 +1326,19 @@ int mudp_bind(mudp_handle ut, const struct sockaddr* addr, socklen_t addrlen) {
     MUDP_ERR_RET(EIO);
   }
 
+  if (udp_is_fallback(s)) {
+    ret = bind(s->fallback_fd, addr, addrlen);
+    uint8_t* ip = (uint8_t*)&addr_in->sin_addr.s_addr;
+    info("%s(%d), fallback fd %d bind ip %u.%u.%u.%u port %u ret %d\n", __func__, idx,
+         s->fallback_fd, ip[0], ip[1], ip[2], ip[3], htons(addr_in->sin_port), ret);
+    return ret;
+  }
+
   ret = udp_verify_bind_addr(s, addr_in, addrlen);
   if (ret < 0) return ret;
 
   /* uinit rx if any */
-  udp_uinit_rxq(impl, s);
+  udp_uinit_rxq(s);
 
   /* set bind port */
   udp_bind_port(s, htons(addr_in->sin_port));
@@ -1286,6 +1369,9 @@ ssize_t mudp_sendto(mudp_handle ut, const void* buf, size_t len, int flags,
   int idx = s->idx;
   int arp_timeout_ms = s->arp_timeout_us / 1000;
   int ret;
+
+  if (udp_is_fallback(s))
+    return sendto(s->fallback_fd, buf, len, flags, dest_addr, addrlen);
 
   const struct sockaddr_in* addr_in = (struct sockaddr_in*)dest_addr;
   ret = udp_verify_sendto_args(len, flags, addr_in, addrlen);
@@ -1354,6 +1440,10 @@ ssize_t mudp_sendmsg(mudp_handle ut, const struct msghdr* msg, int flags) {
   int arp_timeout_ms = s->msg_arp_timeout_us / 1000;
   int ret;
 
+#ifndef WINDOWSENV
+  if (udp_is_fallback(s)) return sendmsg(s->fallback_fd, msg, flags);
+#endif
+
   const struct sockaddr_in* addr_in = (struct sockaddr_in*)msg->msg_name;
   /* len to 1 to let the verify happy */
   ret = udp_verify_sendto_args(1, flags, addr_in, msg->msg_namelen);
@@ -1421,21 +1511,16 @@ int mudp_poll_query(struct mudp_pollfd* fds, mudp_nfds_t nfds, int timeout,
   if (ret < 0) return ret;
 
   struct mudp_impl* s = fds[0].fd;
-  struct mtl_main_impl* impl = s->parent;
 
-  /* init rxq if not */
-  for (mudp_nfds_t i = 0; i < nfds; i++) {
-    s = fds[i].fd;
-    if (!s->rxq) {
-      ret = udp_init_rxq(impl, s);
-      if (ret < 0) {
-        err("%s(%d), init rxq fail\n", __func__, s->idx);
-        return ret;
-      }
+  if (udp_is_fallback(s)) {
+    if (query) {
+      err("%s(%d), query not support for fallback pth\n", __func__, s->idx);
+      return -EIO;
     }
+    return udp_fallback_poll(fds, nfds, timeout);
+  } else {
+    return udp_poll(fds, nfds, timeout, query, priv);
   }
-
-  return udp_poll(fds, nfds, timeout, query, priv);
 }
 
 int mudp_poll(struct mudp_pollfd* fds, mudp_nfds_t nfds, int timeout) {
@@ -1448,6 +1533,9 @@ ssize_t mudp_recvfrom(mudp_handle ut, void* buf, size_t len, int flags,
   struct mtl_main_impl* impl = s->parent;
   int idx = s->idx;
   int ret;
+
+  if (udp_is_fallback(s))
+    return recvfrom(s->fallback_fd, buf, len, flags, src_addr, addrlen);
 
   /* init rxq if not */
   if (!s->rxq) {
@@ -1467,6 +1555,10 @@ ssize_t mudp_recvmsg(mudp_handle ut, struct msghdr* msg, int flags) {
   int idx = s->idx;
   int ret;
 
+#ifndef WINDOWSENV
+  if (udp_is_fallback(s)) return recvmsg(s->fallback_fd, msg, flags);
+#endif
+
   /* init rxq if not */
   if (!s->rxq) {
     ret = udp_init_rxq(impl, s);
@@ -1483,6 +1575,9 @@ int mudp_getsockopt(mudp_handle ut, int level, int optname, void* optval,
                     socklen_t* optlen) {
   struct mudp_impl* s = ut;
   int idx = s->idx;
+
+  if (udp_is_fallback(s))
+    return getsockopt(s->fallback_fd, level, optname, optval, optlen);
 
   switch (level) {
     case SOL_SOCKET: {
@@ -1518,6 +1613,9 @@ int mudp_setsockopt(mudp_handle ut, int level, int optname, const void* optval,
                     socklen_t optlen) {
   struct mudp_impl* s = ut;
   int idx = s->idx;
+
+  if (udp_is_fallback(s))
+    return setsockopt(s->fallback_fd, level, optname, optval, optlen);
 
   switch (level) {
     case SOL_SOCKET: {
@@ -1577,6 +1675,11 @@ int mudp_setsockopt(mudp_handle ut, int level, int optname, const void* optval,
 int mudp_ioctl(mudp_handle ut, unsigned long cmd, va_list args) {
   struct mudp_impl* s = ut;
   int idx = s->idx;
+  MTL_MAY_UNUSED(args);
+
+#ifndef WINDOWSENV
+  if (udp_is_fallback(s)) return ioctl(s->fallback_fd, cmd, args);
+#endif
 
   switch (cmd) {
     case FIONBIO:

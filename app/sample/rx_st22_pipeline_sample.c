@@ -33,6 +33,10 @@ static int rx_st22p_frame_available(void* priv) {
 }
 
 static int rx_st22p_close_source(struct rx_st22p_sample_ctx* s) {
+  if (s->dst_begin) {
+    munmap(s->dst_begin, s->dst_end - s->dst_begin);
+    s->dst_begin = NULL;
+  }
   if (s->dst_fd >= 0) {
     close(s->dst_fd);
     s->dst_fd = 0;
@@ -156,14 +160,15 @@ int main(int argc, char** argv) {
     ops_rx.port.num_port = 1;
     memcpy(ops_rx.port.sip_addr[MTL_SESSION_PORT_P], ctx.rx_sip_addr[MTL_PORT_P],
            MTL_IP_ADDR_LEN);
-    strncpy(ops_rx.port.port[MTL_SESSION_PORT_P], ctx.param.port[MTL_PORT_P],
-            MTL_PORT_MAX_LEN);
-    ops_rx.port.udp_port[MTL_SESSION_PORT_P] = ctx.udp_port + i;
+    snprintf(ops_rx.port.port[MTL_SESSION_PORT_P], MTL_PORT_MAX_LEN, "%s",
+             ctx.param.port[MTL_PORT_P]);
+    ops_rx.port.udp_port[MTL_SESSION_PORT_P] = ctx.udp_port + i * 2;
     ops_rx.port.payload_type = ctx.payload_type;
     ops_rx.width = ctx.width;
     ops_rx.height = ctx.height;
     ops_rx.fps = ctx.fps;
-    ops_rx.output_fmt = ctx.st22p_output_fmt;
+    ops_rx.interlaced = ctx.interlaced;
+    ops_rx.output_fmt = ctx.output_fmt;
     ops_rx.pack_type = ST22_PACK_CODESTREAM;
     ops_rx.codec = ctx.st22p_codec;
     ops_rx.device = ST_PLUGIN_DEVICE_AUTO;

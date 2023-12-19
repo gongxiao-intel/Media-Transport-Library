@@ -48,6 +48,10 @@ static void app_tx_st22p_build_frame(struct st_app_tx_st22p_session* s,
   /* point to next frame */
   s->st22p_frame_cursor += s->st22p_frame_size;
 
+  if (frame->interlaced) {
+    dbg("%s(%d), %s field\n", __func__, s->idx, frame->second_field ? "second" : "first");
+  }
+
   app_tx_st22p_display_frame(s, frame);
 }
 
@@ -85,7 +89,11 @@ static int app_tx_st22p_open_source(struct st_app_tx_st22p_session* s) {
     return -EIO;
   }
 
-  fstat(fd, &i);
+  if (fstat(fd, &i) < 0) {
+    err("%s, fstat %s fail\n", __func__, s->st22p_source_url);
+    close(fd);
+    return -EIO;
+  }
   if (i.st_size < s->st22p_frame_size) {
     err("%s, %s file size small then a frame %d\n", __func__, s->st22p_source_url,
         s->st22p_frame_size);
@@ -117,16 +125,20 @@ static int app_tx_st22p_open_source(struct st_app_tx_st22p_session* s) {
   return 0;
 }
 
-static int app_tx_st22p_start_source(struct st_app_context* ctx,
-                                     struct st_app_tx_st22p_session* s) {
+static int app_tx_st22p_start_source(struct st_app_tx_st22p_session* s) {
   int ret = -EINVAL;
+  int idx = s->idx;
 
   ret = pthread_create(&s->st22p_app_thread, NULL, app_tx_st22p_frame_thread, s);
   if (ret < 0) {
-    err("%s, st22p_app_thread create fail err = %d\n", __func__, ret);
+    err("%s(%d), thread create fail err = %d\n", __func__, idx, ret);
     return ret;
   }
   s->st22p_app_thread_stop = false;
+
+  char thread_name[32];
+  snprintf(thread_name, sizeof(thread_name), "tx_st22p_%d", idx);
+  mtl_thread_setname(s->st22p_app_thread, thread_name);
 
   return 0;
 }
@@ -202,9 +214,9 @@ static int app_tx_st22p_init(struct st_app_context* ctx, st_json_st22p_session_t
          st22p ? st_json_ip(ctx, &st22p->base, MTL_SESSION_PORT_P)
                : ctx->tx_dip_addr[MTL_PORT_P],
          MTL_IP_ADDR_LEN);
-  strncpy(ops.port.port[MTL_SESSION_PORT_P],
-          st22p ? st22p->base.inf[MTL_SESSION_PORT_P]->name : ctx->para.port[MTL_PORT_P],
-          MTL_PORT_MAX_LEN);
+  snprintf(
+      ops.port.port[MTL_SESSION_PORT_P], MTL_PORT_MAX_LEN, "%s",
+      st22p ? st22p->base.inf[MTL_SESSION_PORT_P]->name : ctx->para.port[MTL_PORT_P]);
   ops.port.udp_port[MTL_SESSION_PORT_P] = st22p ? st22p->base.udp_port : (10000 + s->idx);
   if (ctx->has_tx_dst_mac[MTL_PORT_P]) {
     memcpy(&ops.tx_dst_mac[MTL_SESSION_PORT_P][0], ctx->tx_dst_mac[MTL_PORT_P],
@@ -216,10 +228,9 @@ static int app_tx_st22p_init(struct st_app_context* ctx, st_json_st22p_session_t
            st22p ? st_json_ip(ctx, &st22p->base, MTL_SESSION_PORT_R)
                  : ctx->tx_dip_addr[MTL_PORT_R],
            MTL_IP_ADDR_LEN);
-    strncpy(
-        ops.port.port[MTL_SESSION_PORT_R],
-        st22p ? st22p->base.inf[MTL_SESSION_PORT_R]->name : ctx->para.port[MTL_PORT_R],
-        MTL_PORT_MAX_LEN);
+    snprintf(
+        ops.port.port[MTL_SESSION_PORT_R], MTL_PORT_MAX_LEN, "%s",
+        st22p ? st22p->base.inf[MTL_SESSION_PORT_R]->name : ctx->para.port[MTL_PORT_R]);
     ops.port.udp_port[MTL_SESSION_PORT_R] =
         st22p ? st22p->base.udp_port : (10000 + s->idx);
     if (ctx->has_tx_dst_mac[MTL_PORT_R]) {
@@ -232,6 +243,7 @@ static int app_tx_st22p_init(struct st_app_context* ctx, st_json_st22p_session_t
   ops.width = st22p ? st22p->info.width : 1920;
   ops.height = st22p ? st22p->info.height : 1080;
   ops.fps = st22p ? st22p->info.fps : ST_FPS_P59_94;
+  ops.interlaced = st22p ? st22p->info.interlaced : false;
   ops.input_fmt = st22p ? st22p->info.format : ST_FRAME_FMT_YUV422RFC4175PG2BE10;
   ops.pack_type = st22p ? st22p->info.pack_type : ST22_PACK_CODESTREAM;
   ops.codec = st22p ? st22p->info.codec : ST22_CODEC_JPEGXS;
@@ -239,8 +251,11 @@ static int app_tx_st22p_init(struct st_app_context* ctx, st_json_st22p_session_t
   ops.quality = st22p ? st22p->info.quality : ST22_QUALITY_MODE_SPEED;
   ops.codec_thread_cnt = st22p ? st22p->info.codec_thread_count : 0;
   ops.codestream_size = ops.width * ops.height * 3 / 8;
+  if (ops.interlaced) ops.codestream_size /= 2; /* the size is for each field */
   ops.framebuff_cnt = 2;
   ops.notify_frame_available = app_tx_st22p_frame_available;
+  if (st22p && st22p->enable_rtcp) ops.flags |= ST22P_TX_FLAG_ENABLE_RTCP;
+  if (ctx->tx_no_bulk) ops.flags |= ST22P_TX_FLAG_DISABLE_BULK;
 
   s->width = ops.width;
   s->height = ops.height;
@@ -270,7 +285,7 @@ static int app_tx_st22p_init(struct st_app_context* ctx, st_json_st22p_session_t
     app_tx_st22p_uinit(s);
     return ret;
   }
-  ret = app_tx_st22p_start_source(ctx, s);
+  ret = app_tx_st22p_start_source(s);
   if (ret < 0) {
     err("%s(%d), app_tx_st22p_start_source fail %d\n", __func__, idx, ret);
     app_tx_st22p_uinit(s);

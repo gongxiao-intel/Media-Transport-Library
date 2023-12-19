@@ -432,11 +432,54 @@ static int test_st22p_tx_frame_available(void* priv) {
   return 0;
 }
 
+static int test_st22p_tx_frame_done(void* priv, struct st_frame* frame) {
+  tests_context* s = (tests_context*)priv;
+
+  if (!s->handle) return -EIO; /* not ready */
+
+  s->fb_send_done++;
+
+  if (!(frame->flags & ST_FRAME_FLAG_EXT_BUF)) return 0;
+
+  for (int i = 0; i < s->fb_cnt; ++i) {
+    if (frame->addr[0] == s->ext_fb + i * s->frame_size) {
+      s->ext_fb_in_use[i] = false;
+      dbg("%s(%d), frame done at %d\n", __func__, i, s->idx);
+      return 0;
+    }
+  }
+
+  err("%s(%d), unknown frame_addr %p\n", __func__, s->idx, frame->addr[0]);
+  return 0;
+}
+
 static int test_st22p_rx_frame_available(void* priv) {
   tests_context* s = (tests_context*)priv;
 
   s->cv.notify_all();
 
+  return 0;
+}
+
+static int test_st22p_rx_query_ext_frame(void* priv, st_ext_frame* ext_frame,
+                                         struct st22_rx_frame_meta* meta) {
+  auto ctx = (tests_context*)priv;
+  if (!ctx->handle) return -EIO; /* not ready */
+  int i = ctx->ext_idx;
+
+  /* check ext_fb_in_use */
+  if (ctx->ext_fb_in_use[i]) {
+    err("%s(%d), ext frame %d in use\n", __func__, ctx->idx, i);
+    return -EIO;
+  }
+  *ext_frame = ctx->p_ext_frames[i];
+
+  dbg("%s(%d), set ext frame %d(%p) to use\n", __func__, ctx->idx, i, ext_frame->addr);
+  ctx->ext_fb_in_use[i] = true;
+
+  ext_frame->opaque = &ctx->ext_fb_in_use[i];
+
+  if (++ctx->ext_idx >= ctx->fb_cnt) ctx->ext_idx = 0;
   return 0;
 }
 
@@ -449,8 +492,8 @@ static void st22p_tx_ops_init(tests_context* st22, struct st22p_tx_ops* ops_tx) 
   ops_tx->port.num_port = 1;
   memcpy(ops_tx->port.dip_addr[MTL_SESSION_PORT_P], ctx->mcast_ip_addr[MTL_PORT_P],
          MTL_IP_ADDR_LEN);
-  strncpy(ops_tx->port.port[MTL_SESSION_PORT_P], ctx->para.port[MTL_PORT_P],
-          MTL_PORT_MAX_LEN);
+  snprintf(ops_tx->port.port[MTL_SESSION_PORT_P], MTL_PORT_MAX_LEN, "%s",
+           ctx->para.port[MTL_PORT_P]);
   ops_tx->port.udp_port[MTL_SESSION_PORT_P] = ST22P_TEST_UDP_PORT + st22->idx;
   ops_tx->port.payload_type = ST22P_TEST_PAYLOAD_TYPE;
   ops_tx->width = 1920;
@@ -478,8 +521,8 @@ static void st22p_rx_ops_init(tests_context* st22, struct st22p_rx_ops* ops_rx) 
   ops_rx->port.num_port = 1;
   memcpy(ops_rx->port.sip_addr[MTL_SESSION_PORT_P], ctx->mcast_ip_addr[MTL_PORT_P],
          MTL_IP_ADDR_LEN);
-  strncpy(ops_rx->port.port[MTL_SESSION_PORT_P], ctx->para.port[MTL_PORT_R],
-          MTL_PORT_MAX_LEN);
+  snprintf(ops_rx->port.port[MTL_SESSION_PORT_P], MTL_PORT_MAX_LEN, "%s",
+           ctx->para.port[MTL_PORT_R]);
   ops_rx->port.udp_port[MTL_SESSION_PORT_P] = ST22P_TEST_UDP_PORT + st22->idx;
   ops_rx->port.payload_type = ST22P_TEST_PAYLOAD_TYPE;
   ops_rx->width = 1920;
@@ -499,23 +542,23 @@ static void st22p_rx_ops_init(tests_context* st22, struct st22p_rx_ops* ops_rx) 
 static void st22p_tx_assert_cnt(int expect_s22_tx_cnt) {
   auto ctx = st_test_ctx();
   auto handle = ctx->handle;
-  struct mtl_stats stats;
+  struct st_var_info var;
   int ret;
 
-  ret = mtl_get_stats(handle, &stats);
+  ret = st_get_var_info(handle, &var);
   EXPECT_GE(ret, 0);
-  EXPECT_EQ(stats.st22_tx_sessions_cnt, expect_s22_tx_cnt);
+  EXPECT_EQ(var.st22_tx_sessions_cnt, expect_s22_tx_cnt);
 }
 
 static void st22p_rx_assert_cnt(int expect_s22_rx_cnt) {
   auto ctx = st_test_ctx();
   auto handle = ctx->handle;
-  struct mtl_stats stats;
+  struct st_var_info var;
   int ret;
 
-  ret = mtl_get_stats(handle, &stats);
+  ret = st_get_var_info(handle, &var);
   EXPECT_GE(ret, 0);
-  EXPECT_EQ(stats.st22_rx_sessions_cnt, expect_s22_rx_cnt);
+  EXPECT_EQ(var.st22_rx_sessions_cnt, expect_s22_rx_cnt);
 }
 
 TEST(St22p, tx_create_free_single) { pipeline_create_free_test(st22p_tx, 0, 1, 1); }
@@ -570,8 +613,20 @@ static void test_st22p_tx_frame_thread(void* args) {
       frame->timestamp = s->fb_send;
       dbg("%s(%d), timestamp %d\n", __func__, s->idx, s->fb_send);
     }
-    /* directly put */
-    st22p_tx_put_frame((st22p_tx_handle)handle, frame);
+    if (s->p_ext_frames) {
+      int ret = st22p_tx_put_ext_frame((st22p_tx_handle)handle, frame,
+                                       &s->p_ext_frames[s->ext_idx]);
+      if (ret < 0) {
+        err("%s, put ext framebuffer fail %d fb_idx %d\n", __func__, ret, s->ext_idx);
+        continue;
+      }
+      s->ext_fb_in_use[s->ext_idx] = true;
+      s->ext_idx++;
+      if (s->ext_idx >= s->fb_cnt) s->ext_idx = 0;
+    } else {
+      /* directly put */
+      st22p_tx_put_frame((st22p_tx_handle)handle, frame);
+    }
     s->fb_send++;
     if (!s->start_time) {
       s->start_time = st_test_get_monotonic_time();
@@ -607,6 +662,13 @@ static void test_st22p_rx_frame_thread(void* args) {
     if (frame->timestamp == timestamp) s->incomplete_frame_cnt++;
     timestamp = frame->timestamp;
 
+    if (frame->opaque) {
+      /* free dynamic ext frame */
+      bool* in_use = (bool*)frame->opaque;
+      EXPECT_TRUE(*in_use);
+      *in_use = false;
+    }
+
     /* check user timestamp if it has */
     if (s->user_timestamp && !s->user_pacing) {
       if (s->pre_timestamp) {
@@ -632,7 +694,7 @@ static void test_st22p_rx_frame_thread(void* args) {
     }
     if (i >= ST22_TEST_SHA_HIST_NUM) {
       test_sha_dump("st22p_rx_error_sha", sha);
-      s->fail_cnt++;
+      s->sha_fail_cnt++;
     }
     /* directly put */
     st22p_rx_put_frame((st22p_rx_handle)handle, frame);
@@ -652,9 +714,16 @@ struct st22p_rx_digest_test_para {
   enum st_test_level level;
   bool user_timestamp;
   bool vsync;
+  bool rtcp;
+  bool tx_ext;
+  bool rx_ext;
+  bool interlace;
+  uint32_t ssrc;
 };
 
 static void test_st22p_init_rx_digest_para(struct st22p_rx_digest_test_para* para) {
+  memset(para, 0, sizeof(*para));
+
   para->sessions = 1;
   para->fail_interval = 0;
   para->timeout_interval = 0;
@@ -664,6 +733,11 @@ static void test_st22p_init_rx_digest_para(struct st22p_rx_digest_test_para* par
   para->level = ST_TEST_LEVEL_MANDATORY;
   para->user_timestamp = false;
   para->vsync = true;
+  para->rtcp = false;
+  para->tx_ext = false;
+  para->rx_ext = false;
+  para->interlace = false;
+  para->ssrc = 0;
 }
 
 static void st22p_rx_digest_test(enum st_fps fps[], int width[], int height[],
@@ -689,6 +763,13 @@ static void st22p_rx_digest_test(enum st_fps fps[], int width[], int height[],
 
   /* return if level lower than global */
   if (para->level < ctx->level) return;
+
+  if (para->tx_ext || para->rx_ext) {
+    if (ctx->iova == MTL_IOVA_MODE_PA) {
+      info("%s, skip ext_buf test as it's PA iova mode\n", __func__);
+      return;
+    }
+  }
 
   std::vector<tests_context*> test_ctx_tx;
   std::vector<tests_context*> test_ctx_rx;
@@ -741,13 +822,15 @@ static void st22p_rx_digest_test(enum st_fps fps[], int width[], int height[],
     ops_tx.port.num_port = 1;
     memcpy(ops_tx.port.dip_addr[MTL_SESSION_PORT_P], ctx->para.sip_addr[MTL_PORT_R],
            MTL_IP_ADDR_LEN);
-    strncpy(ops_tx.port.port[MTL_SESSION_PORT_P], ctx->para.port[MTL_PORT_P],
-            MTL_PORT_MAX_LEN);
-    ops_tx.port.udp_port[MTL_SESSION_PORT_P] = ST22P_TEST_UDP_PORT + i;
+    snprintf(ops_tx.port.port[MTL_SESSION_PORT_P], MTL_PORT_MAX_LEN, "%s",
+             ctx->para.port[MTL_PORT_P]);
+    ops_tx.port.udp_port[MTL_SESSION_PORT_P] = ST22P_TEST_UDP_PORT + i * 2;
     ops_tx.port.payload_type = ST22P_TEST_PAYLOAD_TYPE;
+    ops_tx.port.ssrc = para->ssrc;
     ops_tx.width = width[i];
     ops_tx.height = height[i];
     ops_tx.fps = fps[i];
+    ops_tx.interlaced = para->interlace;
     ops_tx.input_fmt = fmt[i];
     ops_tx.pack_type = ST22_PACK_CODESTREAM;
     ops_tx.codec = codec[i];
@@ -756,22 +839,83 @@ static void st22p_rx_digest_test(enum st_fps fps[], int width[], int height[],
     ops_tx.framebuff_cnt = test_ctx_tx[i]->fb_cnt;
     ops_tx.notify_frame_available = test_st22p_tx_frame_available;
     ops_tx.notify_event = test_ctx_notify_event;
+    ops_tx.notify_frame_done = test_st22p_tx_frame_done;
     if (para->user_timestamp) ops_tx.flags |= ST22P_TX_FLAG_USER_TIMESTAMP;
     if (para->vsync) ops_tx.flags |= ST22P_TX_FLAG_ENABLE_VSYNC;
+    if (para->tx_ext) {
+      ops_tx.flags |= ST22P_TX_FLAG_EXT_FRAME;
+    }
+
+    struct st_tx_rtcp_ops ops_tx_rtcp;
+    memset(&ops_tx_rtcp, 0, sizeof(ops_tx_rtcp));
+    if (para->rtcp) {
+      ops_tx.flags |= ST22P_TX_FLAG_ENABLE_RTCP;
+      ops_tx_rtcp.rtcp_buffer_size = 512;
+      ops_tx.rtcp = &ops_tx_rtcp;
+    }
 
     test_ctx_tx[i]->frame_size =
-        st_frame_size(ops_tx.input_fmt, ops_tx.width, ops_tx.height, false);
+        st_frame_size(ops_tx.input_fmt, ops_tx.width, ops_tx.height, ops_tx.interlaced);
 
     ops_tx.codestream_size = test_ctx_tx[i]->frame_size / compress_ratio[i];
 
     tx_handle[i] = st22p_tx_create(st, &ops_tx);
     ASSERT_TRUE(tx_handle[i] != NULL);
 
+    EXPECT_EQ(test_ctx_tx[i]->frame_size, st22p_tx_frame_size(tx_handle[i]));
+
+    /* init ext frames, only for no convert */
+    if (para->tx_ext) {
+      uint8_t planes = st_frame_fmt_planes(fmt[i]);
+      size_t frame_size = test_ctx_tx[i]->frame_size;
+
+      test_ctx_tx[i]->p_ext_frames = (struct st_ext_frame*)malloc(
+          sizeof(*test_ctx_tx[i]->p_ext_frames) * test_ctx_tx[i]->fb_cnt);
+      size_t pg_sz = mtl_page_size(st);
+      size_t fb_size = test_ctx_tx[i]->frame_size * test_ctx_tx[i]->fb_cnt;
+      test_ctx_tx[i]->ext_fb_iova_map_sz =
+          mtl_size_page_align(fb_size, pg_sz); /* align */
+      size_t fb_size_malloc = test_ctx_tx[i]->ext_fb_iova_map_sz + pg_sz;
+      test_ctx_tx[i]->ext_fb_malloc = st_test_zmalloc(fb_size_malloc);
+      ASSERT_TRUE(test_ctx_tx[i]->ext_fb_malloc != NULL);
+      test_ctx_tx[i]->ext_fb =
+          (uint8_t*)MTL_ALIGN((uint64_t)test_ctx_tx[i]->ext_fb_malloc, pg_sz);
+      test_ctx_tx[i]->ext_fb_iova =
+          mtl_dma_map(st, test_ctx_tx[i]->ext_fb, test_ctx_tx[i]->ext_fb_iova_map_sz);
+      ASSERT_TRUE(test_ctx_tx[i]->ext_fb_iova != MTL_BAD_IOVA);
+      info("%s, session %d ext_fb %p\n", __func__, i, test_ctx_tx[i]->ext_fb);
+
+      for (int j = 0; j < test_ctx_tx[i]->fb_cnt; j++) {
+        for (uint8_t plane = 0; plane < planes; plane++) { /* assume planes continuous */
+          test_ctx_tx[i]->p_ext_frames[j].linesize[plane] =
+              st_frame_least_linesize(fmt[i], width[i], plane);
+          if (plane == 0) {
+            test_ctx_tx[i]->p_ext_frames[j].addr[plane] =
+                test_ctx_tx[i]->ext_fb + j * frame_size;
+            test_ctx_tx[i]->p_ext_frames[j].iova[plane] =
+                test_ctx_tx[i]->ext_fb_iova + j * frame_size;
+          } else {
+            test_ctx_tx[i]->p_ext_frames[j].addr[plane] =
+                (uint8_t*)test_ctx_tx[i]->p_ext_frames[j].addr[plane - 1] +
+                test_ctx_tx[i]->p_ext_frames[j].linesize[plane - 1] * height[i];
+            test_ctx_tx[i]->p_ext_frames[j].iova[plane] =
+                test_ctx_tx[i]->p_ext_frames[j].iova[plane - 1] +
+                test_ctx_tx[i]->p_ext_frames[j].linesize[plane - 1] * height[i];
+          }
+        }
+        test_ctx_tx[i]->p_ext_frames[j].size = frame_size;
+        test_ctx_tx[i]->p_ext_frames[j].opaque = NULL;
+      }
+    }
+
     /* sha calculate */
     size_t frame_size = test_ctx_tx[i]->frame_size;
     uint8_t* fb;
     for (int frame = 0; frame < ST22_TEST_SHA_HIST_NUM; frame++) {
-      fb = (uint8_t*)st22p_tx_get_fb_addr(tx_handle[i], frame);
+      if (para->tx_ext)
+        fb = (uint8_t*)test_ctx_tx[i]->ext_fb + frame * frame_size;
+      else
+        fb = (uint8_t*)st22p_tx_get_fb_addr(tx_handle[i], frame);
       ASSERT_TRUE(fb != NULL);
       st_test_rand_data(fb, frame_size, frame);
       unsigned char* result = test_ctx_tx[i]->shas[frame];
@@ -808,19 +952,63 @@ static void st22p_rx_digest_test(enum st_fps fps[], int width[], int height[],
     memcpy(test_ctx_rx[i]->shas, test_ctx_tx[i]->shas,
            ST22_TEST_SHA_HIST_NUM * SHA256_DIGEST_LENGTH);
 
+    if (para->rx_ext) {
+      uint8_t planes = st_frame_fmt_planes(fmt[i]);
+      test_ctx_rx[i]->p_ext_frames = (struct st_ext_frame*)malloc(
+          sizeof(*test_ctx_rx[i]->p_ext_frames) * test_ctx_rx[i]->fb_cnt);
+      size_t frame_size = st_frame_size(fmt[i], width[i], height[i], false);
+      size_t pg_sz = mtl_page_size(st);
+      size_t fb_size = frame_size * test_ctx_rx[i]->fb_cnt;
+      test_ctx_rx[i]->ext_fb_iova_map_sz =
+          mtl_size_page_align(fb_size, pg_sz); /* align */
+      size_t fb_size_malloc = test_ctx_rx[i]->ext_fb_iova_map_sz + pg_sz;
+      test_ctx_rx[i]->ext_fb_malloc = st_test_zmalloc(fb_size_malloc);
+      ASSERT_TRUE(test_ctx_rx[i]->ext_fb_malloc != NULL);
+      test_ctx_rx[i]->ext_fb =
+          (uint8_t*)MTL_ALIGN((uint64_t)test_ctx_rx[i]->ext_fb_malloc, pg_sz);
+      test_ctx_rx[i]->ext_fb_iova =
+          mtl_dma_map(st, test_ctx_rx[i]->ext_fb, test_ctx_rx[i]->ext_fb_iova_map_sz);
+      info("%s, session %d ext_fb %p\n", __func__, i, test_ctx_rx[i]->ext_fb);
+      ASSERT_TRUE(test_ctx_rx[i]->ext_fb_iova != MTL_BAD_IOVA);
+
+      for (int j = 0; j < test_ctx_rx[i]->fb_cnt; j++) {
+        for (uint8_t plane = 0; plane < planes; plane++) { /* assume planes continuous */
+          test_ctx_rx[i]->p_ext_frames[j].linesize[plane] =
+              st_frame_least_linesize(fmt[i], width[i], plane);
+          if (plane == 0) {
+            test_ctx_rx[i]->p_ext_frames[j].addr[plane] =
+                test_ctx_rx[i]->ext_fb + j * frame_size;
+            test_ctx_rx[i]->p_ext_frames[j].iova[plane] =
+                test_ctx_rx[i]->ext_fb_iova + j * frame_size;
+          } else {
+            test_ctx_rx[i]->p_ext_frames[j].addr[plane] =
+                (uint8_t*)test_ctx_rx[i]->p_ext_frames[j].addr[plane - 1] +
+                test_ctx_rx[i]->p_ext_frames[j].linesize[plane - 1] * height[i];
+            test_ctx_rx[i]->p_ext_frames[j].iova[plane] =
+                test_ctx_rx[i]->p_ext_frames[j].iova[plane - 1] +
+                test_ctx_rx[i]->p_ext_frames[j].linesize[plane - 1] * height[i];
+          }
+        }
+        test_ctx_rx[i]->p_ext_frames[j].size = frame_size;
+        test_ctx_rx[i]->p_ext_frames[j].opaque = NULL;
+      }
+    }
+
     memset(&ops_rx, 0, sizeof(ops_rx));
     ops_rx.name = "st22p_test";
     ops_rx.priv = test_ctx_rx[i];
     ops_rx.port.num_port = 1;
     memcpy(ops_rx.port.sip_addr[MTL_SESSION_PORT_P], ctx->para.sip_addr[MTL_PORT_P],
            MTL_IP_ADDR_LEN);
-    strncpy(ops_rx.port.port[MTL_SESSION_PORT_P], ctx->para.port[MTL_PORT_R],
-            MTL_PORT_MAX_LEN);
-    ops_rx.port.udp_port[MTL_SESSION_PORT_P] = ST22P_TEST_UDP_PORT + i;
+    snprintf(ops_rx.port.port[MTL_SESSION_PORT_P], MTL_PORT_MAX_LEN, "%s",
+             ctx->para.port[MTL_PORT_R]);
+    ops_rx.port.udp_port[MTL_SESSION_PORT_P] = ST22P_TEST_UDP_PORT + i * 2;
     ops_rx.port.payload_type = ST22P_TEST_PAYLOAD_TYPE;
+    ops_rx.port.ssrc = para->ssrc;
     ops_rx.width = width[i];
     ops_rx.height = height[i];
     ops_rx.fps = fps[i];
+    ops_rx.interlaced = para->interlace;
     ops_rx.output_fmt = fmt[i];
     ops_rx.pack_type = ST22_PACK_CODESTREAM;
     ops_rx.codec = codec[i];
@@ -829,12 +1017,29 @@ static void st22p_rx_digest_test(enum st_fps fps[], int width[], int height[],
     ops_rx.notify_frame_available = test_st22p_rx_frame_available;
     ops_rx.notify_event = test_ctx_notify_event;
     if (para->vsync) ops_rx.flags |= ST22P_RX_FLAG_ENABLE_VSYNC;
+    if (para->rx_ext) {
+      ops_rx.flags |= ST22P_RX_FLAG_EXT_FRAME;
+      ops_rx.query_ext_frame = test_st22p_rx_query_ext_frame;
+    }
+
+    struct st_rx_rtcp_ops ops_rx_rtcp;
+    memset(&ops_rx_rtcp, 0, sizeof(ops_rx_rtcp));
+    if (para->rtcp) {
+      ops_rx.flags |= ST22P_RX_FLAG_ENABLE_RTCP | ST22P_RX_FLAG_SIMULATE_PKT_LOSS;
+      ops_rx_rtcp.nack_interval_us = 100;
+      ops_rx_rtcp.seq_skip_window = 0;
+      ops_rx_rtcp.burst_loss_max = 4;
+      ops_rx_rtcp.sim_loss_rate = 0.0001;
+      ops_rx.rtcp = &ops_rx_rtcp;
+    }
 
     test_ctx_rx[i]->frame_size =
-        st_frame_size(ops_rx.output_fmt, ops_rx.width, ops_rx.height, false);
+        st_frame_size(ops_rx.output_fmt, ops_rx.width, ops_rx.height, ops_rx.interlaced);
 
     rx_handle[i] = st22p_rx_create(st, &ops_rx);
     ASSERT_TRUE(rx_handle[i] != NULL);
+
+    EXPECT_EQ(test_ctx_rx[i]->frame_size, st22p_rx_frame_size(rx_handle[i]));
 
     test_ctx_rx[i]->handle = rx_handle[i];
 
@@ -893,6 +1098,12 @@ static void st22p_rx_digest_test(enum st_fps fps[], int width[], int height[],
          test_ctx_tx[i]->fb_send, framerate_tx[i], expect_framerate_tx[i]);
     EXPECT_GE(test_ctx_rx[i]->fb_send, 0);
     EXPECT_EQ(test_ctx_rx[i]->incomplete_frame_cnt, 0);
+    if (para->tx_ext) {
+      mtl_dma_unmap(st, test_ctx_tx[i]->ext_fb, test_ctx_tx[i]->ext_fb_iova,
+                    test_ctx_tx[i]->ext_fb_iova_map_sz);
+      st_test_free(test_ctx_tx[i]->ext_fb_malloc);
+      st_test_free(test_ctx_tx[i]->p_ext_frames);
+    }
     delete test_ctx_tx[i];
   }
   for (int i = 0; i < sessions; i++) {
@@ -902,7 +1113,7 @@ static void st22p_rx_digest_test(enum st_fps fps[], int width[], int height[],
          test_ctx_rx[i]->fb_rec, framerate_rx[i], expect_framerate_rx[i]);
     EXPECT_GT(test_ctx_rx[i]->fb_rec, 0);
     EXPECT_EQ(test_ctx_rx[i]->incomplete_frame_cnt, 0);
-    EXPECT_EQ(test_ctx_rx[i]->fail_cnt, 0);
+    EXPECT_EQ(test_ctx_rx[i]->sha_fail_cnt, 0);
     if (para->check_fps) {
       if (para->fail_interval || para->timeout_interval) {
         EXPECT_NEAR(framerate_rx[i], expect_framerate_rx[i],
@@ -911,6 +1122,12 @@ static void st22p_rx_digest_test(enum st_fps fps[], int width[], int height[],
         EXPECT_NEAR(framerate_rx[i], expect_framerate_rx[i],
                     expect_framerate_rx[i] * 0.1);
       }
+    }
+    if (para->rx_ext) {
+      mtl_dma_unmap(st, test_ctx_rx[i]->ext_fb, test_ctx_rx[i]->ext_fb_iova,
+                    test_ctx_rx[i]->ext_fb_iova_map_sz);
+      st_test_free(test_ctx_rx[i]->ext_fb_malloc);
+      st_test_free(test_ctx_rx[i]->p_ext_frames);
     }
     delete test_ctx_rx[i];
   }
@@ -927,6 +1144,22 @@ TEST(St22p, digest_st22_1080p_s1) {
   struct st22p_rx_digest_test_para para;
   test_st22p_init_rx_digest_para(&para);
   para.level = ST_TEST_LEVEL_ALL;
+
+  st22p_rx_digest_test(fps, width, height, fmt, codec, compress_ratio, &para);
+}
+
+TEST(St22p, digest_st22_1080i) {
+  enum st_fps fps[1] = {ST_FPS_P59_94};
+  int width[1] = {1920};
+  int height[1] = {1080};
+  enum st_frame_fmt fmt[1] = {ST_FRAME_FMT_YUV422PLANAR10LE};
+  enum st22_codec codec[1] = {ST22_CODEC_JPEGXS};
+  int compress_ratio[1] = {10};
+
+  struct st22p_rx_digest_test_para para;
+  test_st22p_init_rx_digest_para(&para);
+  para.level = ST_TEST_LEVEL_MANDATORY;
+  para.interlace = true;
 
   st22p_rx_digest_test(fps, width, height, fmt, codec, compress_ratio, &para);
 }
@@ -959,6 +1192,7 @@ TEST(St22p, digest_st22_s2) {
   test_st22p_init_rx_digest_para(&para);
   para.sessions = 2;
   para.user_timestamp = true;
+  para.ssrc = 778899;
 
   st22p_rx_digest_test(fps, width, height, fmt, codec, compress_ratio, &para);
 }
@@ -1005,6 +1239,42 @@ TEST(St22p, digest_st22_1080p_rand_size) {
   struct st22p_rx_digest_test_para para;
   test_st22p_init_rx_digest_para(&para);
   para.rand_ratio = 30;
+
+  st22p_rx_digest_test(fps, width, height, fmt, codec, compress_ratio, &para);
+}
+
+TEST(St22p, digest_st22_s2_rtcp) {
+  enum st_fps fps[2] = {ST_FPS_P59_94, ST_FPS_P50};
+  int width[2] = {1920, 1920};
+  int height[2] = {1080, 1080};
+  enum st_frame_fmt fmt[2] = {ST_FRAME_FMT_YUV422PLANAR10LE,
+                              ST_FRAME_FMT_YUV422PLANAR10LE};
+  enum st22_codec codec[2] = {ST22_CODEC_JPEGXS, ST22_CODEC_JPEGXS};
+  int compress_ratio[2] = {10, 16};
+
+  struct st22p_rx_digest_test_para para;
+  test_st22p_init_rx_digest_para(&para);
+  para.sessions = 2;
+  para.check_fps = false;
+  para.rtcp = true;
+
+  st22p_rx_digest_test(fps, width, height, fmt, codec, compress_ratio, &para);
+}
+
+TEST(St22p, digest_st22_s2_ext) {
+  enum st_fps fps[2] = {ST_FPS_P59_94, ST_FPS_P50};
+  int width[2] = {1920, 1920};
+  int height[2] = {1080, 1080};
+  enum st_frame_fmt fmt[2] = {ST_FRAME_FMT_YUV422PLANAR10LE,
+                              ST_FRAME_FMT_YUV422PLANAR10LE};
+  enum st22_codec codec[2] = {ST22_CODEC_JPEGXS, ST22_CODEC_JPEGXS};
+  int compress_ratio[2] = {10, 16};
+
+  struct st22p_rx_digest_test_para para;
+  test_st22p_init_rx_digest_para(&para);
+  para.sessions = 2;
+  para.tx_ext = true;
+  para.rx_ext = true;
 
   st22p_rx_digest_test(fps, width, height, fmt, codec, compress_ratio, &para);
 }

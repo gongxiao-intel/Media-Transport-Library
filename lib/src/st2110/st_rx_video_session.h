@@ -11,19 +11,28 @@
 
 #define ST_RX_VIDEO_DMA_MIN_SIZE (1024)
 
-#define ST_RV_EBU_TSC_SYNC_MS (100) /* sync tsc with ptp period(ms) */
-#define ST_RV_EBU_TSC_SYNC_NS (ST_RV_EBU_TSC_SYNC_MS * 1000 * 1000)
+#define ST_RV_TP_TSC_SYNC_MS (100) /* sync tsc with ptp period(ms) */
+#define ST_RV_TP_TSC_SYNC_NS (ST_RV_TP_TSC_SYNC_MS * 1000 * 1000)
 
 #define ST_RX_VIDEO_PREFIX "RV_"
 
-int st_rx_video_sessions_sch_init(struct mtl_main_impl* impl, struct mt_sch_impl* sch);
+int st_rx_video_sessions_sch_init(struct mtl_main_impl* impl, struct mtl_sch_impl* sch);
 
-int st_rx_video_sessions_sch_uinit(struct mtl_main_impl* impl, struct mt_sch_impl* sch);
+int st_rx_video_sessions_sch_uinit(struct mtl_main_impl* impl, struct mtl_sch_impl* sch);
 
 /* call rx_video_session_put always if get successfully */
 static inline struct st_rx_video_session_impl* rx_video_session_get(
     struct st_rx_video_sessions_mgr* mgr, int idx) {
   rte_spinlock_lock(&mgr->mutex[idx]);
+  struct st_rx_video_session_impl* s = mgr->sessions[idx];
+  if (!s) rte_spinlock_unlock(&mgr->mutex[idx]);
+  return s;
+}
+
+/* call rx_video_session_put always if get successfully */
+static inline struct st_rx_video_session_impl* rx_video_session_get_timeout(
+    struct st_rx_video_sessions_mgr* mgr, int idx, int timeout_us) {
+  if (!mt_spinlock_lock_timeout(mgr->parent, &mgr->mutex[idx], timeout_us)) return NULL;
   struct st_rx_video_session_impl* s = mgr->sessions[idx];
   if (!s) rte_spinlock_unlock(&mgr->mutex[idx]);
   return s;

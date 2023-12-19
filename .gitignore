@@ -61,6 +61,7 @@ dkms.conf
 *.pcap
 *.raw
 *.dat
+*.json
 html/
 test.*
 build/
@@ -70,3 +71,8 @@ assets/
 *.pkg
 *.jxs
 *.mkv
+*.zip
+*.gz
+*.tar
+mtl_system_status_*
+*.pyc

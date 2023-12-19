@@ -16,7 +16,6 @@ function usage()
 buildtype=release
 disable_pcapng=false
 enable_asan=false
-enable_kni=false
 enable_tap=false
 
 if [ -n "$MTL_BUILD_DISABLE_PCAPNG" ];  then
@@ -31,13 +30,6 @@ if [ -n "$MTL_BUILD_ENABLE_ASAN" ];  then
         enable_asan=true
         buildtype=debug # use debug build as default for asan
         echo "Enable asan check."
-    fi
-fi
-
-if [ -n "$MTL_BUILD_ENABLE_KNI" ];  then
-    if [ "$MTL_BUILD_ENABLE_KNI" == "true" ]; then
-        enable_kni=true
-        echo "Enable kni"
     fi
 fi
 
@@ -78,9 +70,10 @@ APP_BUILD_DIR=${WORKSPACE}/build/app
 TEST_BUILD_DIR=${WORKSPACE}/build/tests
 PLUGINS_BUILD_DIR=${WORKSPACE}/build/plugins
 LD_PRELOAD_BUILD_DIR=${WORKSPACE}/build/ld_preload
+MANAGER_BUILD_DIR=${WORKSPACE}/build/manager
 
 # build lib
-meson "${LIB_BUILD_DIR}" -Dbuildtype="$buildtype" -Ddisable_pcapng="$disable_pcapng" -Denable_asan="$enable_asan" -Denable_kni="$enable_kni" -Denable_tap="$enable_tap"
+meson setup "${LIB_BUILD_DIR}" -Dbuildtype="$buildtype" -Ddisable_pcapng="$disable_pcapng" -Denable_asan="$enable_asan" -Denable_tap="$enable_tap"
 pushd "${LIB_BUILD_DIR}"
 ninja
 if [ "$user" == "root" ] || [ "$OS" == "Windows_NT" ]; then
@@ -92,7 +85,7 @@ popd
 
 # build app
 pushd app/
-meson "${APP_BUILD_DIR}" -Dbuildtype="$buildtype" -Denable_asan="$enable_asan"
+meson setup "${APP_BUILD_DIR}" -Dbuildtype="$buildtype" -Denable_asan="$enable_asan"
 popd
 pushd "${APP_BUILD_DIR}"
 ninja
@@ -100,7 +93,7 @@ popd
 
 # build tests
 pushd tests/
-meson "${TEST_BUILD_DIR}" -Dbuildtype="$buildtype" -Denable_asan="$enable_asan"
+meson setup "${TEST_BUILD_DIR}" -Dbuildtype="$buildtype" -Denable_asan="$enable_asan"
 popd
 pushd "${TEST_BUILD_DIR}"
 ninja
@@ -108,7 +101,7 @@ popd
 
 # build plugins
 pushd plugins/
-meson "${PLUGINS_BUILD_DIR}" -Dbuildtype="$buildtype" -Denable_asan="$enable_asan"
+meson setup "${PLUGINS_BUILD_DIR}" -Dbuildtype="$buildtype" -Denable_asan="$enable_asan"
 popd
 pushd "${PLUGINS_BUILD_DIR}"
 ninja
@@ -122,7 +115,7 @@ popd
 # build ld_preload
 if [ "$OS" != "Windows_NT" ]; then
 pushd ld_preload/
-meson "${LD_PRELOAD_BUILD_DIR}" -Dbuildtype="$buildtype" -Denable_asan="$enable_asan"
+meson setup "${LD_PRELOAD_BUILD_DIR}" -Dbuildtype="$buildtype" -Denable_asan="$enable_asan"
 popd
 pushd "${LD_PRELOAD_BUILD_DIR}"
 ninja
@@ -131,5 +124,15 @@ if [ "$user" == "root" ]; then
 else
     sudo ninja install
 fi
+popd
+fi
+
+# build mtl_manager
+if [ "$OS" != "Windows_NT" ]; then
+pushd manager/
+meson setup "${MANAGER_BUILD_DIR}" -Dbuildtype="$buildtype" -Denable_asan="$enable_asan"
+popd
+pushd "${MANAGER_BUILD_DIR}"
+ninja
 popd
 fi

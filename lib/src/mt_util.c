@@ -4,6 +4,11 @@
 
 #include "mt_util.h"
 
+#ifndef WINDOWSENV
+#include <pwd.h>
+#endif
+
+#include "datapath/mt_queue.h"
 #include "mt_log.h"
 #include "mt_main.h"
 
@@ -119,6 +124,9 @@ void mt_rte_free(void* p) {
     }
   }
   mt_pthread_mutex_unlock(&g_bt_mutex);
+  if (bt_info == NULL) { /* not found */
+    err("%s, \033[31m%p already freed\033[0m\n", __func__, p);
+  }
   rte_free(p);
 }
 #endif
@@ -141,6 +149,19 @@ bool mt_bitmap_test_and_set(uint8_t* bitmap, int idx) {
 
   /* set the bit */
   bitmap[pos] = bits | (0x1 << off);
+  return false;
+}
+
+bool mt_bitmap_test_and_unset(uint8_t* bitmap, int idx) {
+  int pos = idx / 8;
+  int off = idx % 8;
+  uint8_t bits = bitmap[pos];
+
+  /* already unset */
+  if (!(bits & (0x1 << off))) return true;
+
+  /* unset the bit */
+  bitmap[pos] = bits & (UINT8_MAX ^ (0x1 << off));
   return false;
 }
 
@@ -328,7 +349,7 @@ void mt_eth_macaddr_dump(enum mtl_port port, char* tag, struct rte_ether_addr* m
 }
 
 struct rte_mbuf* mt_build_pad(struct mtl_main_impl* impl, struct rte_mempool* mempool,
-                              uint16_t port_id, uint16_t ether_type, uint16_t len) {
+                              enum mtl_port port, uint16_t ether_type, uint16_t len) {
   struct rte_ether_addr src_mac;
   struct rte_mbuf* pad;
   struct rte_ether_hdr* eth_hdr;
@@ -339,7 +360,7 @@ struct rte_mbuf* mt_build_pad(struct mtl_main_impl* impl, struct rte_mempool* me
     return NULL;
   }
 
-  rte_eth_macaddr_get(port_id, &src_mac);
+  mt_macaddr_get(impl, port, &src_mac);
   rte_pktmbuf_append(pad, len);
   pad->data_len = len;
   pad->pkt_len = len;
@@ -356,6 +377,44 @@ struct rte_mbuf* mt_build_pad(struct mtl_main_impl* impl, struct rte_mempool* me
   return pad;
 }
 
+int mt_macaddr_get(struct mtl_main_impl* impl, enum mtl_port port,
+                   struct rte_ether_addr* mac_addr) {
+  struct mt_interface* inf = mt_if(impl, port);
+
+  if (inf->drv_info.flags & MT_DRV_F_NOT_DPDK_PMD) {
+    mtl_memcpy(mac_addr, &inf->k_mac_addr, sizeof(*mac_addr));
+    return 0;
+  }
+
+  uint16_t port_id = mt_port_id(impl, port);
+  return rte_eth_macaddr_get(port_id, mac_addr);
+}
+
+#ifdef ST_PCAPNG_ENABLED
+struct rte_mbuf* mt_pcapng_copy(struct mtl_main_impl* impl, enum mtl_port port,
+                                struct mt_rxq_entry* rxq, const struct rte_mbuf* m,
+                                struct rte_mempool* mp, uint32_t length,
+                                uint64_t timestamp, uint64_t tm_ns,
+                                enum rte_pcapng_direction direction) {
+  struct rte_mbuf* mc = NULL;
+  uint16_t port_id = mt_port_id(impl, port);
+  uint32_t queue_id = mt_rxq_queue_id(rxq);
+
+#if RTE_VERSION >= RTE_VERSION_NUM(23, 11, 0, 0)
+  MTL_MAY_UNUSED(timestamp);
+  MTL_MAY_UNUSED(tm_ns);
+  mc = rte_pcapng_copy(port_id, queue_id, m, mp, length, direction, NULL);
+#elif RTE_VERSION >= RTE_VERSION_NUM(23, 3, 0, 0)
+  mc = rte_pcapng_copy(port_id, queue_id, m, mp, length, timestamp, tm_ns, direction,
+                       NULL);
+#else
+  mc = rte_pcapng_copy(port_id, queue_id, m, mp, length, timestamp, tm_ns, direction);
+#endif
+
+  return mc;
+}
+#endif
+
 struct rte_mempool* mt_mempool_create_by_ops(struct mtl_main_impl* impl,
                                              enum mtl_port port, const char* name,
                                              unsigned int n, unsigned int cache_size,
@@ -364,16 +423,20 @@ struct rte_mempool* mt_mempool_create_by_ops(struct mtl_main_impl* impl,
   if (cache_size && (element_size % cache_size)) { /* align to cache size */
     element_size = (element_size / cache_size + 1) * cache_size;
   }
+  char name_with_idx[32]; /* 32 is the max length allowed by mempool api, in our lib we
+                             use concise names so it won't exceed this length */
+  snprintf(name_with_idx, sizeof(name_with_idx), "%s_%d", name, impl->mempool_idx++);
   uint16_t data_room_size = element_size + MT_MBUF_HEADROOM_SIZE; /* include head room */
-  struct rte_mempool* mbuf_pool = rte_pktmbuf_pool_create_by_ops(
-      name, n, cache_size, priv_size, data_room_size, mt_socket_id(impl, port), ops_name);
+  struct rte_mempool* mbuf_pool =
+      rte_pktmbuf_pool_create_by_ops(name_with_idx, n, cache_size, priv_size,
+                                     data_room_size, mt_socket_id(impl, port), ops_name);
   if (!mbuf_pool) {
     err("%s(%d), fail(%s) for %s, n %u\n", __func__, port, rte_strerror(rte_errno), name,
         n);
   } else {
     float size_m = (float)n * (data_room_size + priv_size) / (1024 * 1024);
     info("%s(%d), succ at %p size %fm n %u d %u for %s\n", __func__, port, mbuf_pool,
-         size_m, n, element_size, name);
+         size_m, n, element_size, name_with_idx);
 #ifdef MTL_HAS_ASAN
     g_mt_mempool_create_cnt++;
 #endif
@@ -384,8 +447,9 @@ struct rte_mempool* mt_mempool_create_by_ops(struct mtl_main_impl* impl,
 int mt_mempool_free(struct rte_mempool* mp) {
   unsigned int in_use_count = rte_mempool_in_use_count(mp);
   if (in_use_count) {
-    /* caused by the mbuf is still in nix tx queues? */
+    /* failed to free the mempool, caused by the mbuf is still in nix tx queues? */
     err("%s, still has %d mbuf in mempool %s\n", __func__, in_use_count, mp->name);
+    return 0;
   }
 
   /* no any in-use mbuf */
@@ -455,7 +519,7 @@ int mt_u64_fifo_uinit(struct mt_u64_fifo* fifo) {
 }
 
 /* todo: add overflow check */
-int mt_u64_fifo_put(struct mt_u64_fifo* fifo, uint64_t item) {
+int mt_u64_fifo_put(struct mt_u64_fifo* fifo, const uint64_t item) {
   if (fifo->used >= fifo->size) {
     dbg("%s, fail as fifo is full(%d)\n", __func__, fifo->size);
     return -EIO;
@@ -477,6 +541,105 @@ int mt_u64_fifo_get(struct mt_u64_fifo* fifo, uint64_t* item) {
   fifo->read_idx++;
   if (fifo->read_idx >= fifo->size) fifo->read_idx = 0;
   fifo->used--;
+  return 0;
+}
+
+int mt_u64_fifo_put_bulk(struct mt_u64_fifo* fifo, const uint64_t* items, uint32_t n) {
+  if (fifo->used + n > fifo->size) {
+    dbg("%s, fail as fifo is full(%d)\n", __func__, fifo->size);
+    return -EIO;
+  }
+  uint32_t i = 0;
+  for (i = 0; i < n; i++) {
+    fifo->data[fifo->write_idx] = items[i];
+    fifo->write_idx++;
+    if (fifo->write_idx >= fifo->size) fifo->write_idx = 0;
+  }
+  fifo->used += n;
+  return 0;
+}
+
+int mt_u64_fifo_get_bulk(struct mt_u64_fifo* fifo, uint64_t* items, uint32_t n) {
+  if (fifo->used < n) {
+    dbg("%s, fail as no enough item\n", __func__);
+    return -EIO;
+  }
+  uint32_t i = 0;
+  for (i = 0; i < n; i++) {
+    items[i] = fifo->data[fifo->read_idx];
+    fifo->read_idx++;
+    if (fifo->read_idx >= fifo->size) fifo->read_idx = 0;
+  }
+  fifo->used -= n;
+  return 0;
+}
+
+int mt_u64_fifo_read_back(struct mt_u64_fifo* fifo, uint64_t* item) {
+  if (fifo->used <= 0) {
+    dbg("%s, fail as empty\n", __func__);
+    return -EIO;
+  }
+  int idx = fifo->write_idx - 1;
+  if (idx < 0) idx = fifo->size - 1;
+  *item = fifo->data[idx];
+  return 0;
+}
+
+int mt_u64_fifo_read_front(struct mt_u64_fifo* fifo, uint64_t* item) {
+  if (fifo->used <= 0) {
+    dbg("%s, fail as empty\n", __func__);
+    return -EIO;
+  }
+  *item = fifo->data[fifo->read_idx];
+  return 0;
+}
+
+int mt_u64_fifo_read_any(struct mt_u64_fifo* fifo, uint64_t* item, int skip) {
+  if (fifo->used <= 0) {
+    dbg("%s, fail as empty\n", __func__);
+    return -EIO;
+  }
+  if (skip < 0 || skip >= fifo->used) {
+    dbg("%s, fail as idx(%d) is invalid\n", __func__, idx);
+    return -EIO;
+  }
+  int read_idx = fifo->read_idx + skip;
+  if (read_idx >= fifo->size) read_idx -= fifo->size;
+  *item = fifo->data[read_idx];
+  return 0;
+}
+
+int mt_u64_fifo_read_any_bulk(struct mt_u64_fifo* fifo, uint64_t* items, uint32_t n,
+                              int skip) {
+  if (fifo->used < n) {
+    dbg("%s, fail as no enough item\n", __func__);
+    return -EIO;
+  }
+  if (skip < 0 || skip + n > fifo->used) {
+    dbg("%s, fail as skip(%d)/n(%u) is invalid\n", __func__, skip, n);
+    return -EIO;
+  }
+  int read_idx = fifo->read_idx + skip;
+  if (read_idx >= fifo->size) read_idx -= fifo->size;
+  uint32_t i = 0;
+  for (i = 0; i < n; i++) {
+    items[i] = fifo->data[read_idx];
+    read_idx++;
+    if (read_idx >= fifo->size) read_idx = 0;
+  }
+
+  return 0;
+}
+
+/* only for the mbuf fifo */
+int mt_fifo_mbuf_clean(struct mt_u64_fifo* fifo) {
+  struct rte_mbuf* mbuf;
+
+  while (mt_u64_fifo_count(fifo) > 0) {
+    mt_u64_fifo_get(fifo, (uint64_t*)&mbuf);
+    rte_pktmbuf_free(mbuf);
+  }
+
   return 0;
 }
 
@@ -510,7 +673,8 @@ int mt_cvt_dma_ctx_uinit(struct mt_cvt_dma_ctx* ctx) {
 }
 
 int mt_cvt_dma_ctx_push(struct mt_cvt_dma_ctx* ctx, int type) {
-  mt_u64_fifo_put(ctx->fifo, type);
+  int ret = mt_u64_fifo_put(ctx->fifo, type);
+  if (ret < 0) return ret;
   ctx->tran[type]++;
   dbg("%s, tran %d for type %d\n", __func__, ctx->tran[type], type);
   return 0;
@@ -518,7 +682,8 @@ int mt_cvt_dma_ctx_push(struct mt_cvt_dma_ctx* ctx, int type) {
 
 int mt_cvt_dma_ctx_pop(struct mt_cvt_dma_ctx* ctx) {
   uint64_t type = 0;
-  mt_u64_fifo_get(ctx->fifo, &type);
+  int ret = mt_u64_fifo_get(ctx->fifo, &type);
+  if (ret < 0) return ret;
   ctx->done[type]++;
   dbg("%s, done %d for type %" PRIu64 "\n", __func__, ctx->done[type], type);
   return 0;
@@ -538,7 +703,7 @@ int mt_run_cmd(const char* cmd, char* out, size_t out_len) {
     out[0] = 0;
     ret = fgets(out, out_len, fp);
     if (!ret) {
-      err("%s, cmd %s read return fail\n", __func__, cmd);
+      warn("%s, cmd %s read return fail\n", __func__, cmd);
       pclose(fp);
       return -EIO;
     }
@@ -628,15 +793,27 @@ int st_frame_trans_uinit(struct st_frame_trans* frame) {
     frame->page_table_len = 0;
   }
 
+  if (frame->user_meta) {
+    mt_rte_free(frame->user_meta);
+    frame->user_meta = NULL;
+    frame->user_meta_buffer_size = 0;
+  }
+
   return 0;
 }
 
 int st_vsync_calculate(struct mtl_main_impl* impl, struct st_vsync_info* vsync) {
   uint64_t ptp_time = mt_get_ptp_time(impl, MTL_PORT_P);
+  uint64_t next_epoch;
   uint64_t to_next_epochs;
 
-  vsync->meta.epoch = ptp_time / vsync->meta.frame_time + 1;
-  to_next_epochs = vsync->meta.epoch * vsync->meta.frame_time - ptp_time;
+  next_epoch = ptp_time / vsync->meta.frame_time + 1;
+  if (next_epoch == vsync->meta.epoch) {
+    dbg("%s, ptp_time still in current epoch\n", __func__);
+    next_epoch++; /* sync to next */
+  }
+  to_next_epochs = next_epoch * vsync->meta.frame_time - ptp_time;
+  vsync->meta.epoch = next_epoch;
   vsync->next_epoch_tsc = mt_get_tsc(impl) + to_next_epochs;
 
   dbg("%s, to_next_epochs %fms\n", __func__, (float)to_next_epochs / NS_PER_MS);
@@ -658,4 +835,197 @@ uint16_t mt_random_port(uint16_t base_port) {
   }
 
   return port;
+}
+
+static const char* dpdk_afxdp_port_prefix = "dpdk_af_xdp:";
+static const char* dpdk_afpkt_port_prefix = "dpdk_af_packet:";
+static const char* kernel_port_prefix = "kernel:";
+static const char* native_afxdp_port_prefix = "native_af_xdp:";
+
+enum mtl_pmd_type mtl_pmd_by_port_name(const char* port) {
+  dbg("%s, port %s\n", __func__, port);
+  if (strncmp(port, dpdk_afxdp_port_prefix, strlen(dpdk_afxdp_port_prefix)) == 0)
+    return MTL_PMD_DPDK_AF_XDP;
+  else if (strncmp(port, dpdk_afpkt_port_prefix, strlen(dpdk_afpkt_port_prefix)) == 0)
+    return MTL_PMD_DPDK_AF_PACKET;
+  else if (strncmp(port, kernel_port_prefix, strlen(kernel_port_prefix)) == 0)
+    return MTL_PMD_KERNEL_SOCKET;
+  else if (strncmp(port, native_afxdp_port_prefix, strlen(native_afxdp_port_prefix)) == 0)
+    return MTL_PMD_NATIVE_AF_XDP;
+  else
+    return MTL_PMD_DPDK_USER; /* default */
+}
+
+const char* mt_kernel_port2if(const char* port) {
+  if (mtl_pmd_by_port_name(port) != MTL_PMD_KERNEL_SOCKET) {
+    err("%s, port %s is not a kernel based\n", __func__, port);
+    return NULL;
+  }
+  return port + strlen(kernel_port_prefix);
+}
+
+const char* mt_dpdk_afxdp_port2if(const char* port) {
+  if (mtl_pmd_by_port_name(port) != MTL_PMD_DPDK_AF_XDP) {
+    err("%s, port %s is not dpdk_af_xdp\n", __func__, port);
+    return NULL;
+  }
+  return port + strlen(dpdk_afxdp_port_prefix);
+}
+
+const char* mt_dpdk_afpkt_port2if(const char* port) {
+  if (mtl_pmd_by_port_name(port) != MTL_PMD_DPDK_AF_PACKET) {
+    err("%s, port %s is not a dpdk_af_pkt\n", __func__, port);
+    return NULL;
+  }
+  return port + strlen(dpdk_afpkt_port_prefix);
+}
+
+const char* mt_native_afxdp_port2if(const char* port) {
+  if (mtl_pmd_by_port_name(port) != MTL_PMD_NATIVE_AF_XDP) {
+    err("%s, port %s is not native_af_xdp\n", __func__, port);
+    return NULL;
+  }
+  return port + strlen(native_afxdp_port_prefix);
+}
+
+int mt_user_info_init(struct mt_user_info* info) {
+  int ret = -EIO;
+
+  info->pid = getpid();
+
+#ifdef WINDOWSENV /* todo */
+  MTL_MAY_UNUSED(ret);
+  snprintf(info->hostname, sizeof(info->hostname), "%s", "unknow");
+  snprintf(info->user, sizeof(info->user), "%s", "unknow");
+  snprintf(info->comm, sizeof(info->comm), "%s", "unknow");
+#else
+  ret = gethostname(info->hostname, sizeof(info->hostname));
+  if (ret < 0) {
+    warn("%s, gethostname fail %d\n", __func__, ret);
+    snprintf(info->hostname, sizeof(info->hostname), "%s", "unknow");
+  }
+  uid_t uid = getuid();
+  struct passwd* user_info = getpwuid(uid);
+  snprintf(info->user, sizeof(info->user), "%s",
+           user_info ? user_info->pw_name : "unknow");
+  char comm_path[128];
+  snprintf(comm_path, sizeof(comm_path), "/proc/%d/comm", info->pid);
+  int fd = open(comm_path, O_RDONLY);
+  if (fd >= 0) {
+    ssize_t bytes = read(fd, info->comm, sizeof(info->comm) - 1);
+    if (bytes <= 0)
+      snprintf(info->comm, sizeof(info->comm), "%s", "unknow");
+    else
+      info->comm[strcspn(info->comm, "\n")] = '\0';
+    close(fd);
+  } else {
+    snprintf(info->comm, sizeof(info->comm), "%s", "unknow");
+  }
+  dbg("%s, comm %s\n", __func__, info->comm);
+#endif
+
+  return 0;
+}
+
+int mt_read_cpu_usage(struct mt_cpu_usage* usages, int* cpu_ids, int num_cpus) {
+#ifdef WINDOWSENV /* todo */
+  MTL_MAY_UNUSED(usages);
+  MTL_MAY_UNUSED(cpu_ids);
+  MTL_MAY_UNUSED(num_cpus);
+  err("%s, not support on windows\n", __func__);
+  return -ENOTSUP;
+#else
+  FILE* file;
+  char line[256];
+  int found = 0;
+
+  file = fopen("/proc/stat", "r");
+  if (!file) {
+    err("%s, open /proc/stat fail\n", __func__);
+    return -EIO;
+  }
+
+  while (fgets(line, sizeof(line) - 1, file)) {
+    struct mt_cpu_usage cur;
+    int cpu;
+    int parsed = sscanf(line,
+                        "cpu%d %" PRIu64 " %" PRIu64 " %" PRIu64 " %" PRIu64 " %" PRIu64
+                        " %" PRIu64 " %" PRIu64 " %" PRIu64 "",
+                        &cpu, &cur.user, &cur.nice, &cur.system, &cur.idle, &cur.iowait,
+                        &cur.irq, &cur.softirq, &cur.steal);
+    if (parsed != 9) continue;
+    /* check if match with any input cpus */
+    for (int i = 0; i < num_cpus; i++) {
+      if (cpu == cpu_ids[i]) {
+        found++;
+        usages[i] = cur;
+        dbg("%s, get succ for cpu %d at %d\n", __func__, cpu, i);
+        break;
+      }
+    }
+  }
+
+  fclose(file);
+  return found;
+#endif
+}
+
+double mt_calculate_cpu_usage(struct mt_cpu_usage* prev, struct mt_cpu_usage* curr) {
+  uint64_t prev_idle = prev->idle + prev->iowait;
+  uint64_t curr_idle = curr->idle + curr->iowait;
+  uint64_t prev_total = prev->user + prev->nice + prev->system + prev->idle +
+                        prev->iowait + prev->irq + prev->softirq + prev->steal;
+  uint64_t curr_total = curr->user + curr->nice + curr->system + curr->idle +
+                        curr->iowait + curr->irq + curr->softirq + curr->steal;
+  uint64_t totald = curr_total - prev_total;
+  uint64_t idled = curr_idle - prev_idle;
+
+  return 100.0 * (totald - idled) / totald;
+}
+
+bool mt_file_exists(const char* filename) {
+  FILE* file = fopen(filename, "r");
+  if (file) {
+    fclose(file);
+    return true;
+  }
+  return false;
+}
+
+int mt_sysfs_write_uint32(const char* path, uint32_t value) {
+  int fd = open(path, O_WRONLY);
+  if (fd < 0) {
+    err("%s, open %s fail %d\n", __func__, path, fd);
+    return -EIO;
+  }
+
+  char buf[64];
+  snprintf(buf, sizeof(buf), "%u", value);
+  size_t len = strlen(buf);
+  ssize_t bytes_written = write(fd, buf, len);
+  int ret;
+  if (bytes_written != len) {
+    warn("%s, write %u to %s fail\n", __func__, value, path);
+    ret = -EIO;
+  } else {
+    ret = 0;
+  }
+
+  close(fd);
+  return ret;
+}
+
+#define MT_HASH_KEY_LENGTH (40)
+// clang-format off
+static uint8_t mt_rss_hash_key[MT_HASH_KEY_LENGTH] = {
+  0x6d, 0x5a, 0x56, 0xda, 0x25, 0x5b, 0x0e, 0xc2,
+  0x41, 0x67, 0x25, 0x3d, 0x43, 0xa3, 0x8f, 0xb0,
+  0xd0, 0xca, 0x2b, 0xcb, 0xae, 0x7b, 0x30, 0xb4,
+  0x77, 0xcb, 0x2d, 0xa3, 0x80, 0x30, 0xf2, 0x0c,
+  0x6a, 0x42, 0xb7, 0x3b, 0xbe, 0xac, 0x01, 0xfa,
+};
+// clang-format on
+
+uint32_t mt_softrss(uint32_t* input_tuple, uint32_t input_len) {
+  return rte_softrss(input_tuple, input_len, mt_rss_hash_key);
 }

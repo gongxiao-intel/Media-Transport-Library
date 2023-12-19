@@ -77,6 +77,7 @@ enum st_frame_status {
   ST_FRAME_STATUS_MAX,
 };
 
+#ifndef __MTL_PYTHON_BUILD__
 /**
  * A structure describing rfc3550 rtp header, size: 12
  */
@@ -124,6 +125,7 @@ MTL_PACK(struct st_rfc3550_rtp_hdr {
   uint32_t ssrc;
 });
 #endif
+#endif
 
 /**
  * The structure describing the destination address(ip addr and port) info for TX.
@@ -131,9 +133,9 @@ MTL_PACK(struct st_rfc3550_rtp_hdr {
  */
 struct st_tx_dest_info {
   /** destination IP address of sender */
-  uint8_t dip_addr[MTL_PORT_MAX][MTL_IP_ADDR_LEN];
+  uint8_t dip_addr[MTL_SESSION_PORT_MAX][MTL_IP_ADDR_LEN];
   /** UDP port number */
-  uint16_t udp_port[MTL_PORT_MAX];
+  uint16_t udp_port[MTL_SESSION_PORT_MAX];
 };
 
 /**
@@ -142,9 +144,11 @@ struct st_tx_dest_info {
  */
 struct st_rx_source_info {
   /** source IP address of sender */
-  uint8_t sip_addr[MTL_PORT_MAX][MTL_IP_ADDR_LEN];
+  uint8_t sip_addr[MTL_SESSION_PORT_MAX][MTL_IP_ADDR_LEN];
   /** UDP port number */
-  uint16_t udp_port[MTL_PORT_MAX];
+  uint16_t udp_port[MTL_SESSION_PORT_MAX];
+  /** Optional. source filter IP address of multicast */
+  uint8_t mcast_sip_addr[MTL_SESSION_PORT_MAX][MTL_IP_ADDR_LEN];
 };
 
 /**
@@ -163,7 +167,7 @@ struct st_pcap_dump_meta {
 struct st_queue_meta {
   /** 1 or 2, num of ports this session attached to */
   uint8_t num_port;
-  /** starting netdev queue id */
+  /** starting netdev queue id for afxdp */
   uint8_t start_queue[MTL_PORT_MAX];
   /** queue id this session attached to */
   uint8_t queue_id[MTL_PORT_MAX];
@@ -190,9 +194,48 @@ enum st_event {
    * args point to struct st10_vsync_meta.
    */
   ST_EVENT_VSYNC = 0,
+  /** the error occurred and session recovery successfully */
+  ST_EVENT_RECOVERY_ERROR,
+  /** fatal error and session can't recovery, app should free the session then */
+  ST_EVENT_FATAL_ERROR,
   /** max value of this enum */
   ST_EVENT_MAX,
 };
+
+/**
+ * A structure used to retrieve varied info for an media instance.
+ */
+struct st_var_info {
+  /** st20 tx session count */
+  uint16_t st20_tx_sessions_cnt;
+  /** st22 tx session count */
+  uint16_t st22_tx_sessions_cnt;
+  /** st30 tx session count */
+  uint16_t st30_tx_sessions_cnt;
+  /** st40 tx session count */
+  uint16_t st40_tx_sessions_cnt;
+  /** st20 rx session count */
+  uint16_t st20_rx_sessions_cnt;
+  /** st22 rx session count */
+  uint16_t st22_rx_sessions_cnt;
+  /** st30 rx session count */
+  uint16_t st30_rx_sessions_cnt;
+  /** st40 rx session count */
+  uint16_t st40_rx_sessions_cnt;
+};
+
+/**
+ * Retrieve the varied info of the media transport device context.
+ *
+ * @param mt
+ *   The handle to the media transport device context.
+ * @param info
+ *   A pointer to info structure.
+ * @return
+ *   - 0 if successful.
+ *   - <0: Error code if fail.
+ */
+int st_get_var_info(mtl_handle mt, struct st_var_info* info);
 
 /**
  * Inline function to check the  rx frame is a completed frame.

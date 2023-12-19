@@ -4,8 +4,9 @@
 
 #include "mt_dhcp.h"
 
-#include "mt_dev.h"
+#include "datapath/mt_queue.h"
 #include "mt_log.h"
+#include "mt_util.h"
 
 #define DHCP_OP_BOOTREQUEST (1)
 #define DHCP_OP_BOOTREPLY (2)
@@ -47,15 +48,14 @@ static int dhcp_send_discover(struct mtl_main_impl* impl, enum mtl_port port) {
   uint8_t* options;
   size_t hdr_offset = 0;
 
-  pkt = rte_pktmbuf_alloc(mt_get_tx_mempool(impl, port));
+  pkt = rte_pktmbuf_alloc(mt_sys_tx_mempool(impl, port));
   if (!pkt) {
     err("%s(%d), pkt alloc fail\n", __func__, port);
     return -ENOMEM;
   }
 
   eth = rte_pktmbuf_mtod(pkt, struct rte_ether_hdr*);
-  uint16_t port_id = mt_port_id(impl, port);
-  rte_eth_macaddr_get(port_id, mt_eth_s_addr(eth));
+  mt_macaddr_get(impl, port, mt_eth_s_addr(eth));
   memset(mt_eth_d_addr(eth), 0xFF, RTE_ETHER_ADDR_LEN); /* send to broadcast */
   eth->ether_type = htons(RTE_ETHER_TYPE_IPV4);
   hdr_offset += sizeof(*eth);
@@ -104,7 +104,7 @@ static int dhcp_send_discover(struct mtl_main_impl* impl, enum mtl_port port) {
   udp->dgram_len = htons(pkt->pkt_len - sizeof(*eth) - sizeof(*ip));
 
   /* send dhcp discover packet */
-  uint16_t send = mt_dev_tx_sys_queue_burst(impl, port, &pkt, 1);
+  uint16_t send = mt_sys_queue_tx_burst(impl, port, &pkt, 1);
   if (send < 1) {
     err_once("%s(%d), tx fail\n", __func__, port);
     rte_pktmbuf_free(pkt);
@@ -128,15 +128,14 @@ static int dhcp_send_request(struct mtl_main_impl* impl, enum mtl_port port) {
   uint8_t* options;
   size_t hdr_offset = 0;
 
-  pkt = rte_pktmbuf_alloc(mt_get_tx_mempool(impl, port));
+  pkt = rte_pktmbuf_alloc(mt_sys_tx_mempool(impl, port));
   if (!pkt) {
     err("%s(%d), pkt alloc fail\n", __func__, port);
     return -ENOMEM;
   }
 
   eth = rte_pktmbuf_mtod(pkt, struct rte_ether_hdr*);
-  uint16_t port_id = mt_port_id(impl, port);
-  rte_eth_macaddr_get(port_id, mt_eth_s_addr(eth));
+  mt_macaddr_get(impl, port, mt_eth_s_addr(eth));
   memset(mt_eth_d_addr(eth), 0xFF, RTE_ETHER_ADDR_LEN);
   eth->ether_type = htons(RTE_ETHER_TYPE_IPV4);
   hdr_offset += sizeof(*eth);
@@ -212,7 +211,7 @@ static int dhcp_send_request(struct mtl_main_impl* impl, enum mtl_port port) {
   udp->dgram_len = htons(pkt->pkt_len - sizeof(*eth) - sizeof(*ip));
 
   /* send dhcp request packet */
-  uint16_t send = mt_dev_tx_sys_queue_burst(impl, port, &pkt, 1);
+  uint16_t send = mt_sys_queue_tx_burst(impl, port, &pkt, 1);
   if (send < 1) {
     err_once("%s(%d), tx fail\n", __func__, port);
     rte_pktmbuf_free(pkt);
@@ -361,15 +360,14 @@ static int dhcp_send_release(struct mtl_main_impl* impl, enum mtl_port port) {
   uint8_t* options;
   size_t hdr_offset = 0;
 
-  pkt = rte_pktmbuf_alloc(mt_get_tx_mempool(impl, port));
+  pkt = rte_pktmbuf_alloc(mt_sys_tx_mempool(impl, port));
   if (!pkt) {
     err("%s(%d), pkt alloc fail\n", __func__, port);
     return -ENOMEM;
   }
 
   eth = rte_pktmbuf_mtod(pkt, struct rte_ether_hdr*);
-  uint16_t port_id = mt_port_id(impl, port);
-  rte_eth_macaddr_get(port_id, mt_eth_s_addr(eth));
+  mt_macaddr_get(impl, port, mt_eth_s_addr(eth));
   memset(mt_eth_d_addr(eth), 0xFF, RTE_ETHER_ADDR_LEN);
   eth->ether_type = htons(RTE_ETHER_TYPE_IPV4);
   hdr_offset += sizeof(*eth);
@@ -426,7 +424,7 @@ static int dhcp_send_release(struct mtl_main_impl* impl, enum mtl_port port) {
   udp->dgram_len = htons(pkt->pkt_len - sizeof(*eth) - sizeof(*ip));
 
   /* send dhcp release packet */
-  uint16_t send = mt_dev_tx_sys_queue_burst(impl, port, &pkt, 1);
+  uint16_t send = mt_sys_queue_tx_burst(impl, port, &pkt, 1);
   if (send < 1) {
     err_once("%s(%d), tx fail\n", __func__, port);
     rte_pktmbuf_free(pkt);

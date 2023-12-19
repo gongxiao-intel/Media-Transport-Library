@@ -9,9 +9,12 @@
 
 #define ST_TX_VIDEO_PREFIX "TV_"
 
-int st_tx_video_sessions_sch_init(struct mtl_main_impl* impl, struct mt_sch_impl* sch);
+#define ST_TX_VIDEO_RTCP_BURST_SIZE (32)
+#define ST_TX_VIDEO_RTCP_RING_SIZE (1024)
 
-int st_tx_video_sessions_sch_uinit(struct mtl_main_impl* impl, struct mt_sch_impl* sch);
+int st_tx_video_sessions_sch_init(struct mtl_main_impl* impl, struct mtl_sch_impl* sch);
+
+int st_tx_video_sessions_sch_uinit(struct mtl_main_impl* impl, struct mtl_sch_impl* sch);
 
 /* call tx_video_session_put always if get successfully */
 static inline struct st_tx_video_session_impl* tx_video_session_get(
@@ -26,6 +29,15 @@ static inline struct st_tx_video_session_impl* tx_video_session_get(
 static inline struct st_tx_video_session_impl* tx_video_session_try_get(
     struct st_tx_video_sessions_mgr* mgr, int idx) {
   if (!rte_spinlock_trylock(&mgr->mutex[idx])) return NULL;
+  struct st_tx_video_session_impl* s = mgr->sessions[idx];
+  if (!s) rte_spinlock_unlock(&mgr->mutex[idx]);
+  return s;
+}
+
+/* call tx_video_session_put always if get successfully */
+static inline struct st_tx_video_session_impl* tx_video_session_get_timeout(
+    struct st_tx_video_sessions_mgr* mgr, int idx, int timeout_us) {
+  if (!mt_spinlock_lock_timeout(mgr->parent, &mgr->mutex[idx], timeout_us)) return NULL;
   struct st_tx_video_session_impl* s = mgr->sessions[idx];
   if (!s) rte_spinlock_unlock(&mgr->mutex[idx]);
   return s;
@@ -61,10 +73,11 @@ static inline float tx_video_session_get_cpu_busy(struct st_tx_video_session_imp
   return s->cpu_busy_score;
 }
 
-int st_tx_video_session_migrate(struct mtl_main_impl* impl,
-                                struct st_tx_video_sessions_mgr* mgr,
+int st_tx_video_session_migrate(struct st_tx_video_sessions_mgr* mgr,
                                 struct st_tx_video_session_impl* s, int idx);
 
-int st20_pacing_static_profiling(struct st_tx_video_session_impl* s);
+int st20_pacing_static_profiling(struct mtl_main_impl* impl,
+                                 struct st_tx_video_session_impl* s,
+                                 enum mtl_session_port s_port);
 
 #endif

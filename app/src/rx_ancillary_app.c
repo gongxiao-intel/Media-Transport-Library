@@ -130,23 +130,28 @@ static int app_rx_anc_init(struct st_app_context* ctx, st_json_ancillary_session
          anc ? st_json_ip(ctx, &anc->base, MTL_SESSION_PORT_P)
              : ctx->rx_sip_addr[MTL_PORT_P],
          MTL_IP_ADDR_LEN);
-  strncpy(ops.port[MTL_SESSION_PORT_P],
-          anc ? anc->base.inf[MTL_SESSION_PORT_P]->name : ctx->para.port[MTL_PORT_P],
-          MTL_PORT_MAX_LEN);
+  memcpy(ops.mcast_sip_addr[MTL_SESSION_PORT_P],
+         anc ? anc->base.mcast_src_ip[MTL_PORT_P] : ctx->rx_mcast_sip_addr[MTL_PORT_P],
+         MTL_IP_ADDR_LEN);
+  snprintf(ops.port[MTL_SESSION_PORT_P], MTL_PORT_MAX_LEN, "%s",
+           anc ? anc->base.inf[MTL_SESSION_PORT_P]->name : ctx->para.port[MTL_PORT_P]);
   ops.udp_port[MTL_SESSION_PORT_P] = anc ? anc->base.udp_port : (10200 + s->idx);
   if (ops.num_port > 1) {
     memcpy(ops.sip_addr[MTL_SESSION_PORT_R],
            anc ? st_json_ip(ctx, &anc->base, MTL_SESSION_PORT_R)
                : ctx->rx_sip_addr[MTL_PORT_R],
            MTL_IP_ADDR_LEN);
-    strncpy(ops.port[MTL_SESSION_PORT_R],
-            anc ? anc->base.inf[MTL_SESSION_PORT_R]->name : ctx->para.port[MTL_PORT_R],
-            MTL_PORT_MAX_LEN);
+    memcpy(ops.mcast_sip_addr[MTL_SESSION_PORT_R],
+           anc ? anc->base.mcast_src_ip[MTL_PORT_R] : ctx->rx_mcast_sip_addr[MTL_PORT_R],
+           MTL_IP_ADDR_LEN);
+    snprintf(ops.port[MTL_SESSION_PORT_R], MTL_PORT_MAX_LEN, "%s",
+             anc ? anc->base.inf[MTL_SESSION_PORT_R]->name : ctx->para.port[MTL_PORT_R]);
     ops.udp_port[MTL_SESSION_PORT_R] = anc ? anc->base.udp_port : (10200 + s->idx);
   }
   ops.rtp_ring_size = 1024;
   ops.payload_type = anc ? anc->base.payload_type : ST_APP_PAYLOAD_TYPE_ANCILLARY;
   ops.notify_rtp_ready = app_rx_anc_rtp_ready;
+  if (anc && anc->enable_rtcp) ops.flags |= ST40_RX_FLAG_ENABLE_RTCP;
   st_pthread_mutex_init(&s->st40_wake_mutex, NULL);
   st_pthread_cond_init(&s->st40_wake_cond, NULL);
 
@@ -162,6 +167,10 @@ static int app_rx_anc_init(struct st_app_context* ctx, st_json_ancillary_session
     err("%s, st40_app_thread create fail %d\n", __func__, ret);
     return -EIO;
   }
+
+  char thread_name[32];
+  snprintf(thread_name, sizeof(thread_name), "rx_anc_%d", idx);
+  mtl_thread_setname(s->st40_app_thread, thread_name);
 
   return 0;
 }

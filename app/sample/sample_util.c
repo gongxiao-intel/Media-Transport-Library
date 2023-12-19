@@ -43,6 +43,9 @@ enum sample_args_cmd {
   SAMPLE_ARG_PTP_TSC,
   SAMPLE_ARG_UDP_LCORE,
   SAMPLE_ARG_RSS_MODE,
+  SAMPLE_ARG_NB_TX_DESC,
+  SAMPLE_ARG_NB_RX_DESC,
+  SAMPLE_ARG_DHCP,
 
   SAMPLE_ARG_TX_VIDEO_URL = 0x200,
   SAMPLE_ARG_RX_VIDEO_URL,
@@ -52,10 +55,12 @@ enum sample_args_cmd {
   SAMPLE_ARG_SESSIONS_CNT,
   SAMPLE_ARG_EXT_FRAME,
   SAMPLE_ARG_ST22_CODEC,
-  SAMPLE_ARG_ST22_FRAME_FMT,
+  SAMPLE_ARG_PIPELINE_FRAME_FMT,
   SAMPLE_ARG_GDDR_PA,
   SAMPLE_ARG_RX_DUMP,
   SAMPLE_ARG_USE_CPU_COPY,
+  SAMPLE_ARG_USER_META,
+  SAMPLE_ARG_LIB_PTP,
 
   SAMPLE_ARG_UDP_MODE = 0x300,
   SAMPLE_ARG_UDP_LEN,
@@ -94,6 +99,9 @@ static struct option sample_args_options[] = {
     {"ptp_tsc", no_argument, 0, SAMPLE_ARG_PTP_TSC},
     {"udp_lcore", no_argument, 0, SAMPLE_ARG_UDP_LCORE},
     {"rss_mode", required_argument, 0, SAMPLE_ARG_RSS_MODE},
+    {"nb_tx_desc", required_argument, 0, SAMPLE_ARG_NB_TX_DESC},
+    {"nb_rx_desc", required_argument, 0, SAMPLE_ARG_NB_RX_DESC},
+    {"dhcp", no_argument, 0, SAMPLE_ARG_DHCP},
 
     {"tx_url", required_argument, 0, SAMPLE_ARG_TX_VIDEO_URL},
     {"rx_url", required_argument, 0, SAMPLE_ARG_RX_VIDEO_URL},
@@ -102,7 +110,8 @@ static struct option sample_args_options[] = {
     {"height", required_argument, 0, SAMPLE_ARG_HEIGHT},
     {"ext_frame", no_argument, 0, SAMPLE_ARG_EXT_FRAME},
     {"st22_codec", required_argument, 0, SAMPLE_ARG_ST22_CODEC},
-    {"st22_fmt", required_argument, 0, SAMPLE_ARG_ST22_FRAME_FMT},
+    {"pipeline_fmt", required_argument, 0, SAMPLE_ARG_PIPELINE_FRAME_FMT},
+    {"ptp", no_argument, 0, SAMPLE_ARG_LIB_PTP},
 
     {"udp_mode", required_argument, 0, SAMPLE_ARG_UDP_MODE},
     {"udp_len", required_argument, 0, SAMPLE_ARG_UDP_LEN},
@@ -110,6 +119,7 @@ static struct option sample_args_options[] = {
     {"gddr_pa", required_argument, 0, SAMPLE_ARG_GDDR_PA},
     {"use_cpu_copy", no_argument, 0, SAMPLE_ARG_USE_CPU_COPY},
     {"rx_dump", no_argument, 0, SAMPLE_ARG_RX_DUMP},
+    {"user_meta", no_argument, 0, SAMPLE_ARG_USER_META},
 
     {0, 0, 0, 0}};
 
@@ -238,8 +248,15 @@ static int _sample_parse_args(struct st_sample_context* ctx, int argc, char** ar
       case SAMPLE_ARG_PTP_TSC:
         p->flags |= MTL_FLAG_PTP_SOURCE_TSC;
         break;
+      case SAMPLE_ARG_LIB_PTP:
+        p->flags |= MTL_FLAG_PTP_ENABLE;
+        break;
       case SAMPLE_ARG_UDP_LCORE:
         p->flags |= MTL_FLAG_UDP_LCORE;
+        break;
+      case SAMPLE_ARG_DHCP:
+        for (int port = 0; port < MTL_PORT_MAX; port++)
+          p->net_proto[port] = MTL_PROTO_DHCP;
         break;
       case SAMPLE_ARG_RSS_MODE:
         if (!strcmp(optarg, "l3"))
@@ -250,6 +267,12 @@ static int _sample_parse_args(struct st_sample_context* ctx, int argc, char** ar
           p->rss_mode = MTL_RSS_MODE_NONE;
         else
           err("%s, unknow rss mode %s\n", __func__, optarg);
+        break;
+      case SAMPLE_ARG_NB_TX_DESC:
+        p->nb_tx_desc = atoi(optarg);
+        break;
+      case SAMPLE_ARG_NB_RX_DESC:
+        p->nb_rx_desc = atoi(optarg);
         break;
       case SAMPLE_ARG_QUEUES_CNT:
         for (int i = 0; i < MTL_PORT_MAX; i++) {
@@ -292,11 +315,11 @@ static int _sample_parse_args(struct st_sample_context* ctx, int argc, char** ar
         else
           err("%s, unknown codec %s\n", __func__, optarg);
         break;
-      case SAMPLE_ARG_ST22_FRAME_FMT: {
+      case SAMPLE_ARG_PIPELINE_FRAME_FMT: {
         enum st_frame_fmt fmt = st_frame_name_to_fmt(optarg);
         if (fmt < ST_FRAME_FMT_MAX) {
-          ctx->st22p_input_fmt = fmt;
-          ctx->st22p_output_fmt = fmt;
+          ctx->input_fmt = fmt;
+          ctx->output_fmt = fmt;
         } else {
           err("%s, unknown fmt %s\n", __func__, optarg);
         }
@@ -325,6 +348,9 @@ static int _sample_parse_args(struct st_sample_context* ctx, int argc, char** ar
         break;
       case SAMPLE_ARG_RX_DUMP:
         ctx->rx_dump = true;
+        break;
+      case SAMPLE_ARG_USER_META:
+        ctx->has_user_meta = true;
         break;
       case SAMPLE_ARG_USE_CPU_COPY:
         ctx->use_cpu_copy = true;
@@ -355,6 +381,18 @@ static void sample_sig_handler(int signo) {
   return;
 }
 
+static int sample_set_afxdp(struct st_sample_context* ctx) {
+  struct mtl_init_params* p = &ctx->param;
+
+  for (uint8_t i = 0; i < p->num_ports; i++) {
+    p->pmd[i] = mtl_pmd_by_port_name(p->port[i]);
+    if (!mtl_pmd_is_af_xdp(p->pmd[i])) continue;
+    p->xdp_info[i].start_queue = 1;
+  }
+
+  return 0;
+}
+
 int sample_parse_args(struct st_sample_context* ctx, int argc, char** argv, bool tx,
                       bool rx, bool unicast) {
   struct mtl_init_params* p = &ctx->param;
@@ -367,14 +405,14 @@ int sample_parse_args(struct st_sample_context* ctx, int argc, char** argv, bool
   p->log_level = MTL_LOG_LEVEL_INFO; /* default to info */
   /* use different default port/ip for tx and rx */
   if (rx) {
-    strncpy(p->port[MTL_PORT_P], "0000:af:01.0", MTL_PORT_MAX_LEN);
+    snprintf(p->port[MTL_PORT_P], MTL_PORT_MAX_LEN, "%s", "0000:af:01.0");
     inet_pton(AF_INET, "192.168.85.80", mtl_p_sip_addr(p));
-    strncpy(p->port[MTL_PORT_R], "0000:af:01.1", MTL_PORT_MAX_LEN);
+    snprintf(p->port[MTL_PORT_R], MTL_PORT_MAX_LEN, "%s", "0000:af:01.1");
     inet_pton(AF_INET, "192.168.85.81", mtl_r_sip_addr(p));
   } else {
-    strncpy(p->port[MTL_PORT_P], "0000:af:01.1", MTL_PORT_MAX_LEN);
+    snprintf(p->port[MTL_PORT_P], MTL_PORT_MAX_LEN, "%s", "0000:af:01.1");
     inet_pton(AF_INET, "192.168.85.60", mtl_p_sip_addr(p));
-    strncpy(p->port[MTL_PORT_R], "0000:af:01.0", MTL_PORT_MAX_LEN);
+    snprintf(p->port[MTL_PORT_R], MTL_PORT_MAX_LEN, "%s", "0000:af:01.0");
     inet_pton(AF_INET, "192.168.85.61", mtl_r_sip_addr(p));
   }
   if (unicast) {
@@ -391,7 +429,7 @@ int sample_parse_args(struct st_sample_context* ctx, int argc, char** argv, bool
   inet_pton(AF_INET, "239.168.86.20", ctx->fwd_dip_addr[MTL_PORT_P]);
   inet_pton(AF_INET, "239.168.86.21", ctx->fwd_dip_addr[MTL_PORT_R]);
 
-  strncpy(p->dma_dev_port[0], "0000:80:04.0", MTL_PORT_MAX_LEN);
+  snprintf(p->dma_dev_port[0], MTL_PORT_MAX_LEN, "%s", "0000:80:04.0");
 
   if (!ctx->sessions) ctx->sessions = 1;
   ctx->framebuff_cnt = 3;
@@ -399,19 +437,17 @@ int sample_parse_args(struct st_sample_context* ctx, int argc, char** argv, bool
   ctx->height = 1080;
   ctx->fps = ST_FPS_P59_94;
   ctx->fmt = ST20_FMT_YUV_422_10BIT;
-  ctx->input_fmt = ST_FRAME_FMT_YUV422RFC4175PG2BE10;
-  ctx->output_fmt = ST_FRAME_FMT_YUV422RFC4175PG2BE10;
+  ctx->input_fmt = ST_FRAME_FMT_YUV422PLANAR10LE;
+  ctx->output_fmt = ST_FRAME_FMT_YUV422PLANAR10LE;
   ctx->udp_port = 20000;
   ctx->payload_type = 112;
-  strncpy(ctx->tx_url, "test.yuv", sizeof(ctx->tx_url));
-  strncpy(ctx->rx_url, "rx.yuv", sizeof(ctx->rx_url));
+  snprintf(ctx->tx_url, sizeof(ctx->tx_url), "%s", "test.yuv");
+  snprintf(ctx->rx_url, sizeof(ctx->rx_url), "%s", "rx.yuv");
 
-  strncpy(ctx->logo_url, "logo.yuv", sizeof(ctx->rx_url));
+  snprintf(ctx->logo_url, sizeof(ctx->rx_url), "%s", "logo.yuv");
   ctx->logo_width = 200;
   ctx->logo_height = 200;
 
-  ctx->st22p_input_fmt = ST_FRAME_FMT_YUV422PLANAR10LE;
-  ctx->st22p_output_fmt = ST_FRAME_FMT_YUV422PLANAR10LE;
   ctx->st22p_codec = ST22_CODEC_JPEGXS;
 
   _sample_parse_args(ctx, argc, argv);
@@ -421,6 +457,7 @@ int sample_parse_args(struct st_sample_context* ctx, int argc, char** argv, bool
 
   if (tx) sample_tx_queue_cnt_set(ctx, ctx->sessions);
   if (rx) sample_rx_queue_cnt_set(ctx, ctx->sessions);
+  sample_set_afxdp(ctx);
 
   return 0;
 }

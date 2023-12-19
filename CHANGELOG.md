@@ -1,6 +1,33 @@
 # Changelog
 
-## Changelog for 23.07
+## Changelog for 24.04
+
+* dpdk: upgrade dpdk version to 23.11.
+* st22: add interlaced support.
+
+## Changelog for 23.12
+
+* log: add log to file support, see mtl_openlog_stream.
+* dpdk: upgrade dpdk version to 23.07.
+* virtio_user: add virtio_user support for exception path, deprecate kni.
+* st22p/tx: add external frame support, see ST22P_TX_FLAG_EXT_FRAME.
+* backend: add kernel socket based backend, see doc/kernel_socket.md.
+* dpdk pmd: add AF_PACKET PMD support, see doc/experimental/af_packet.md.
+* st22p/rx: add external frame support, see ST22P_RX_FLAG_EXT_FRAME.
+* ptp: add user callback for ptp sync message. See ptp_sync_notify in struct mtl_init_params.
+* api: add arp timeout parameter support for st2110 unicast address. See arp_timeout_s in struct mtl_init_params.
+* st2110/tx: fix RTP passthrough interface support when PMD doesn't support multi segment mbuf.
+* st2110/tx: fix redundant when PMD doesn't support multi segment mbuf.
+* backend/kernel: add multi thread support for both TX and RX.
+* convert: add interlace support.
+* rtcp: add retransmit packet support for st20 sessions, see STxx_RX_FLAG_ENABLE_RTCP.
+* st2110: add ssrc support.
+* rss: add multi-core support.
+* log: default add time info print, and a API `mtl_set_log_prefix_formatter` to customize the log prefix formatter.
+* lcore: add `LcoreMgr` tools to manage the inactive lcore status. See doc/lcore.md
+* ice: update driver to 1.12.7
+
+## Changelog for 23.08
 
 * lib: add DHCP client implementation.
 * ice: update driver to 1.11.14
@@ -28,6 +55,10 @@
 * udp: add reuse port support.
 * udp: add fork support
 * Windows: add MSVC sample build, refer to app/sample/msvc/imtl_sample.
+* audio: improve max density per process to 750 for both tx and rx by shared queue and no_tx_chain.
+* ptp: add tsc time source support for VF.
+* doc: use vf mode as default for E810 nic.
+* tx/st20: improve the pacing profile accuracy.
 
 ## Changelog for 23.04
 

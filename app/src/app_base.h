@@ -9,8 +9,8 @@
 #include <SDL2/SDL_ttf.h>
 #endif
 #include <errno.h>
+#include <mtl/experimental/st20_combined_api.h>
 #include <mtl/st20_api.h>
-#include <mtl/st20_redundant_api.h>
 #include <mtl/st30_api.h>
 #include <mtl/st40_api.h>
 #include <mtl/st_pipeline_api.h>
@@ -47,6 +47,14 @@
 
 #ifndef NS_PER_S
 #define NS_PER_S (1000000000)
+#endif
+
+#ifndef NS_PER_US
+#define NS_PER_US (1000)
+#endif
+
+#ifndef NS_PER_MS
+#define NS_PER_MS (1000 * 1000)
 #endif
 
 #define UTC_OFFSET (37) /* 2022/07 */
@@ -100,6 +108,7 @@ struct st_app_tx_video_session {
   uint16_t framebuff_producer_idx;
   uint16_t framebuff_consumer_idx;
   struct st_tx_frame* framebuffs;
+  bool sha_check;
 
   pcap_t* st20_pcap;
   bool st20_pcap_input;
@@ -123,8 +132,10 @@ struct st_app_tx_video_session {
   bool single_line;
   bool slice;
   bool enable_vsync;
+  uint8_t num_port;
+  uint64_t last_stat_time_ns;
 
-  /* rtp info */
+  /* rtp mode info */
   bool st20_rtp_input;
   int st20_pkts_in_line;  /* GPM only, number of packets per each line, 4 for 1080p */
   int st20_bytes_in_line; /* bytes per line, 4800 for 1080p yuv422 10bit */
@@ -215,10 +226,13 @@ struct st_app_rx_video_session {
   int idx;
   mtl_handle st;
   st20_rx_handle handle;
-  st20r_rx_handle st20r_handle; /* for st20r */
+  st20rc_rx_handle st20r_handle; /* for st20r */
   int framebuff_cnt;
   int st20_frame_size;
   bool slice;
+  uint8_t num_port;
+  uint64_t last_stat_time_ns;
+  bool sha_check;
 
   char st20_dst_url[ST_APP_URL_MAX_LEN];
   int st20_dst_fb_cnt; /* the count of received fbs will be saved to file */
@@ -418,6 +432,9 @@ struct st_app_tx_st20p_session {
   int st20p_frame_size;
   int width;
   int height;
+  uint8_t num_port;
+  uint64_t last_stat_time_ns;
+  bool sha_check;
 
   char st20p_source_url[ST_APP_URL_MAX_LEN];
   uint8_t* st20p_source_begin;
@@ -442,6 +459,9 @@ struct st_app_rx_st20p_session {
   int st20p_frame_size;
   int width;
   int height;
+  uint8_t num_port;
+  uint64_t last_stat_time_ns;
+  bool sha_check;
 
   /* stat */
   int stat_frame_received;
@@ -480,11 +500,20 @@ struct st_app_context {
 
   int lcore[ST_APP_MAX_LCORES];
   int rtp_lcore[ST_APP_MAX_LCORES];
+  FILE* mtl_log_stream;
+  uint64_t last_stat_time_ns;
 
   bool runtime_session;
   bool enable_hdr_split;
   bool tx_copy_once;
   bool app_thread;
+  bool enable_timing_parser;
+
+  bool ptp_systime_sync;
+  int ptp_sync_cnt;
+  int64_t ptp_sync_delta_sum;
+  int64_t ptp_sync_delta_max;
+  int64_t ptp_sync_delta_min;
 
   char tx_video_url[ST_APP_URL_MAX_LEN]; /* send video content url*/
   struct st_app_tx_video_session* tx_video_sessions;
@@ -493,7 +522,12 @@ struct st_app_context {
   uint16_t tx_start_vrx;
   uint16_t tx_pad_interval;
   bool tx_no_static_pad;
+  bool tx_ts_first_pkt;
+  bool tx_ts_epoch;
+  int32_t tx_ts_delta_us;
   enum st21_pacing tx_pacing_type;
+  bool tx_no_bulk;
+  bool video_sha_check;
 
   struct st_app_tx_audio_session* tx_audio_sessions;
   char tx_audio_url[ST_APP_URL_MAX_LEN];
@@ -515,7 +549,8 @@ struct st_app_context {
   struct st_app_tx_st20p_session* tx_st20p_sessions;
   int tx_st20p_session_cnt;
 
-  uint8_t rx_sip_addr[MTL_PORT_MAX][MTL_IP_ADDR_LEN]; /* rx source IP */
+  uint8_t rx_sip_addr[MTL_PORT_MAX][MTL_IP_ADDR_LEN];       /* rx source IP */
+  uint8_t rx_mcast_sip_addr[MTL_PORT_MAX][MTL_IP_ADDR_LEN]; /* rx multicast source IP */
 
   struct st_app_rx_video_session* rx_video_sessions;
   int rx_video_session_cnt;
@@ -562,12 +597,21 @@ static inline void* st_app_zmalloc(size_t sz) {
 
 static inline void st_app_free(void* p) { free(p); }
 
+static inline uint64_t st_timespec_to_ns(const struct timespec* ts) {
+  return ((uint64_t)ts->tv_sec * NS_PER_S) + ts->tv_nsec;
+}
+
+static inline void st_ns_to_timespec(uint64_t ns, struct timespec* ts) {
+  ts->tv_sec = ns / NS_PER_S;
+  ts->tv_nsec = ns % NS_PER_S;
+}
+
 /* Monotonic time (in nanoseconds) since some unspecified starting point. */
 static inline uint64_t st_app_get_monotonic_time() {
   struct timespec ts;
 
   clock_gettime(ST_CLOCK_MONOTONIC_ID, &ts);
-  return ((uint64_t)ts.tv_sec * NS_PER_S) + ts.tv_nsec;
+  return st_timespec_to_ns(&ts);
 }
 
 int st_app_video_get_lcore(struct st_app_context* ctx, int sch_idx, bool rtp,
@@ -575,5 +619,9 @@ int st_app_video_get_lcore(struct st_app_context* ctx, int sch_idx, bool rtp,
 
 uint8_t* st_json_ip(struct st_app_context* ctx, st_json_session_base_t* base,
                     enum mtl_session_port port);
+
+int st_set_mtl_log_file(struct st_app_context* ctx, const char* file);
+
+void st_sha_dump(const char* tag, const unsigned char* sha);
 
 #endif

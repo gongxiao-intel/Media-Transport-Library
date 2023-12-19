@@ -18,6 +18,10 @@ static void app_rx_st22p_consume_frame(struct st_app_rx_st22p_session* s,
                                        struct st_frame* frame) {
   struct st_display* d = s->display;
 
+  if (frame->interlaced) {
+    dbg("%s(%d), %s field\n", __func__, s->idx, frame->second_field ? "second" : "first");
+  }
+
   if (d && d->front_frame) {
     if (st_pthread_mutex_trylock(&d->display_frame_mutex) == 0) {
       if (frame->fmt == ST_FRAME_FMT_UYVY)
@@ -89,6 +93,10 @@ static int app_rx_st22p_init_frame_thread(struct st_app_rx_st22p_session* s) {
     return -EIO;
   }
 
+  char thread_name[32];
+  snprintf(thread_name, sizeof(thread_name), "rx_st22p_%d", idx);
+  mtl_thread_setname(s->st22p_app_thread, thread_name);
+
   return 0;
 }
 
@@ -140,19 +148,26 @@ static int app_rx_st22p_init(struct st_app_context* ctx,
          st22p ? st_json_ip(ctx, &st22p->base, MTL_SESSION_PORT_P)
                : ctx->rx_sip_addr[MTL_PORT_P],
          MTL_IP_ADDR_LEN);
-  strncpy(ops.port.port[MTL_SESSION_PORT_P],
-          st22p ? st22p->base.inf[MTL_SESSION_PORT_P]->name : ctx->para.port[MTL_PORT_P],
-          MTL_PORT_MAX_LEN);
+  memcpy(
+      ops.port.mcast_sip_addr[MTL_SESSION_PORT_P],
+      st22p ? st22p->base.mcast_src_ip[MTL_PORT_P] : ctx->rx_mcast_sip_addr[MTL_PORT_P],
+      MTL_IP_ADDR_LEN);
+  snprintf(
+      ops.port.port[MTL_SESSION_PORT_P], MTL_PORT_MAX_LEN, "%s",
+      st22p ? st22p->base.inf[MTL_SESSION_PORT_P]->name : ctx->para.port[MTL_PORT_P]);
   ops.port.udp_port[MTL_SESSION_PORT_P] = st22p ? st22p->base.udp_port : (10000 + s->idx);
   if (ops.port.num_port > 1) {
     memcpy(ops.port.sip_addr[MTL_SESSION_PORT_R],
            st22p ? st_json_ip(ctx, &st22p->base, MTL_SESSION_PORT_R)
                  : ctx->rx_sip_addr[MTL_PORT_R],
            MTL_IP_ADDR_LEN);
-    strncpy(
-        ops.port.port[MTL_SESSION_PORT_R],
-        st22p ? st22p->base.inf[MTL_SESSION_PORT_R]->name : ctx->para.port[MTL_PORT_R],
-        MTL_PORT_MAX_LEN);
+    memcpy(
+        ops.port.mcast_sip_addr[MTL_SESSION_PORT_R],
+        st22p ? st22p->base.mcast_src_ip[MTL_PORT_R] : ctx->rx_mcast_sip_addr[MTL_PORT_R],
+        MTL_IP_ADDR_LEN);
+    snprintf(
+        ops.port.port[MTL_SESSION_PORT_R], MTL_PORT_MAX_LEN, "%s",
+        st22p ? st22p->base.inf[MTL_SESSION_PORT_R]->name : ctx->para.port[MTL_PORT_R]);
     ops.port.udp_port[MTL_SESSION_PORT_R] =
         st22p ? st22p->base.udp_port : (10000 + s->idx);
   }
@@ -160,6 +175,7 @@ static int app_rx_st22p_init(struct st_app_context* ctx,
   ops.width = st22p ? st22p->info.width : 1920;
   ops.height = st22p ? st22p->info.height : 1080;
   ops.fps = st22p ? st22p->info.fps : ST_FPS_P59_94;
+  ops.interlaced = st22p ? st22p->info.interlaced : false;
   ops.output_fmt = st22p ? st22p->info.format : ST_FRAME_FMT_YUV422RFC4175PG2BE10;
   ops.port.payload_type = st22p ? st22p->base.payload_type : ST_APP_PAYLOAD_TYPE_ST22;
   ops.pack_type = st22p ? st22p->info.pack_type : ST22_PACK_CODESTREAM;
@@ -169,6 +185,7 @@ static int app_rx_st22p_init(struct st_app_context* ctx,
   ops.max_codestream_size = 0;
   ops.notify_frame_available = app_rx_st22p_frame_available;
   ops.framebuff_cnt = s->framebuff_cnt;
+  if (st22p && st22p->enable_rtcp) ops.flags |= ST22P_RX_FLAG_ENABLE_RTCP;
 
   st_pthread_mutex_init(&s->st22p_wake_mutex, NULL);
   st_pthread_cond_init(&s->st22p_wake_cond, NULL);

@@ -15,7 +15,7 @@ static inline bool mt_rtp_len_valid(uint16_t len) {
 }
 
 /* ip from 224.x.x.x to 239.x.x.x */
-static inline bool mt_is_multicast_ip(uint8_t ip[MTL_IP_ADDR_LEN]) {
+static inline bool mt_is_multicast_ip(const uint8_t ip[MTL_IP_ADDR_LEN]) {
   if (ip[0] >= 224 && ip[0] <= 239)
     return true;
   else
@@ -49,6 +49,7 @@ static inline void mt_u32_to_ip(uint32_t group, uint8_t ip[MTL_IP_ADDR_LEN]) {
 
 bool mt_bitmap_test_and_set(uint8_t* bitmap, int idx);
 bool mt_bitmap_test(uint8_t* bitmap, int idx);
+bool mt_bitmap_test_and_unset(uint8_t* bitmap, int idx);
 
 /* only for mbuf ring with RING_F_SP_ENQ | RING_F_SC_DEQ */
 int mt_ring_dequeue_clean(struct rte_ring* ring);
@@ -98,7 +99,10 @@ static inline bool st_rx_seq_drop(uint16_t new_id, uint16_t old_id, uint16_t del
 }
 
 struct rte_mbuf* mt_build_pad(struct mtl_main_impl* impl, struct rte_mempool* mempool,
-                              uint16_t port_id, uint16_t ether_type, uint16_t len);
+                              enum mtl_port port, uint16_t ether_type, uint16_t len);
+
+int mt_macaddr_get(struct mtl_main_impl* impl, enum mtl_port port,
+                   struct rte_ether_addr* mac_addr);
 
 struct rte_mempool* mt_mempool_create_by_ops(struct mtl_main_impl* impl,
                                              enum mtl_port port, const char* name,
@@ -136,14 +140,28 @@ struct mt_u64_fifo {
 
 struct mt_u64_fifo* mt_u64_fifo_init(int size, int soc_id);
 int mt_u64_fifo_uinit(struct mt_u64_fifo* fifo);
-int mt_u64_fifo_put(struct mt_u64_fifo* fifo, uint64_t item);
+int mt_u64_fifo_put(struct mt_u64_fifo* fifo, const uint64_t item);
 int mt_u64_fifo_get(struct mt_u64_fifo* fifo, uint64_t* item);
+int mt_u64_fifo_put_bulk(struct mt_u64_fifo* fifo, const uint64_t* items, uint32_t n);
+int mt_u64_fifo_get_bulk(struct mt_u64_fifo* fifo, uint64_t* items, uint32_t n);
+int mt_u64_fifo_read_back(struct mt_u64_fifo* fifo, uint64_t* item);
+int mt_u64_fifo_read_front(struct mt_u64_fifo* fifo, uint64_t* item);
+int mt_u64_fifo_read_any(struct mt_u64_fifo* fifo, uint64_t* item, int skip);
+int mt_u64_fifo_read_any_bulk(struct mt_u64_fifo* fifo, uint64_t* items, uint32_t n,
+                              int skip);
 
 static inline int mt_u64_fifo_full(struct mt_u64_fifo* fifo) {
   return fifo->used == fifo->size;
 }
 
 static inline int mt_u64_fifo_count(struct mt_u64_fifo* fifo) { return fifo->used; }
+
+static inline int mt_u64_fifo_free_count(struct mt_u64_fifo* fifo) {
+  return fifo->size - fifo->used;
+}
+
+/* only for the mbuf fifo */
+int mt_fifo_mbuf_clean(struct mt_u64_fifo* fifo);
 
 struct mt_cvt_dma_ctx {
   struct mt_u64_fifo* fifo;
@@ -177,6 +195,83 @@ int st_vsync_calculate(struct mtl_main_impl* impl, struct st_vsync_info* vsync);
 
 uint16_t mt_random_port(uint16_t base_port);
 
-static inline const char* mt_msg_safe(const char* msg) { return msg ? msg : "null"; }
+static inline const char* mt_string_safe(const char* msg) { return msg ? msg : "null"; }
+
+static inline void mt_mbuf_refcnt_inc_bulk(struct rte_mbuf** mbufs, uint16_t nb) {
+  struct rte_mbuf* m = NULL;
+  for (uint16_t i = 0; i < nb; i++) {
+    m = mbufs[i];
+    while (m) {
+      rte_mbuf_refcnt_update(m, 1);
+      m = m->next;
+    }
+  }
+}
+
+static inline bool mt_udp_matched(const struct mt_rxq_flow* flow,
+                                  const struct mt_udp_hdr* hdr) {
+  const struct rte_ipv4_hdr* ipv4 = &hdr->ipv4;
+  const struct rte_udp_hdr* udp = &hdr->udp;
+  bool ip_matched, port_matched;
+
+  if (flow->flags & MT_RXQ_FLOW_F_NO_IP) {
+    ip_matched = true;
+  } else {
+    ip_matched = mt_is_multicast_ip(flow->dip_addr)
+                     ? (ipv4->dst_addr == *(uint32_t*)flow->dip_addr)
+                     : (ipv4->src_addr == *(uint32_t*)flow->dip_addr);
+  }
+  if (flow->flags & MT_RXQ_FLOW_F_NO_PORT) {
+    port_matched = true;
+  } else {
+    port_matched = ntohs(udp->dst_port) == flow->dst_port;
+  }
+
+  if (ip_matched && port_matched)
+    return true;
+  else
+    return false;
+}
+
+#ifdef WINDOWSENV
+static inline int mt_fd_set_nonbolck(int fd) {
+  MTL_MAY_UNUSED(fd);
+  return -ENOTSUP;
+}
+#else
+static inline int mt_fd_set_nonbolck(int fd) {
+  int flags = fcntl(fd, F_GETFL, 0);
+  flags |= O_NONBLOCK;
+  return fcntl(fd, F_SETFL, flags);
+}
+#endif
+
+const char* mt_dpdk_afxdp_port2if(const char* port);
+const char* mt_dpdk_afpkt_port2if(const char* port);
+const char* mt_kernel_port2if(const char* port);
+const char* mt_native_afxdp_port2if(const char* port);
+
+int mt_user_info_init(struct mt_user_info* info);
+
+struct mt_cpu_usage {
+  uint64_t user;
+  uint64_t nice;
+  uint64_t system;
+  uint64_t idle;
+  uint64_t iowait;
+  uint64_t irq;
+  uint64_t softirq;
+  uint64_t steal;
+};
+
+int mt_read_cpu_usage(struct mt_cpu_usage* usages, int* cpu_ids, int num_cpus);
+
+double mt_calculate_cpu_usage(struct mt_cpu_usage* prev, struct mt_cpu_usage* curr);
+
+bool mt_file_exists(const char* filename);
+
+int mt_sysfs_write_uint32(const char* path, uint32_t value);
+
+uint32_t mt_softrss(uint32_t* input_tuple, uint32_t input_len);
 
 #endif

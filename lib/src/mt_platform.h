@@ -16,11 +16,14 @@
 #endif /* MTL_DISABLE_PCAPNG */
 #else  /* Linux */
 #include <arpa/inet.h>
+#include <linux/ethtool.h>
+#include <linux/sockios.h>
 #include <net/if.h>
 #include <net/if_arp.h>
 #include <netinet/udp.h>
 #include <numa.h>
 #include <poll.h>
+#include <pthread.h>
 #include <sys/ioctl.h>
 #include <sys/shm.h>
 #include <sys/socket.h>
@@ -78,10 +81,10 @@ typedef unsigned long int nfds_t;
 static inline int mt_pthread_mutex_init(pthread_mutex_t* mutex,
                                         pthread_mutexattr_t* p_attr) {
 #ifdef MT_ENABLE_P_SHARED
+  pthread_mutexattr_t attr;
   if (p_attr) {
     pthread_mutexattr_setpshared(p_attr, PTHREAD_PROCESS_SHARED);
   } else {
-    pthread_mutexattr_t attr;
     pthread_mutexattr_init(&attr);
     pthread_mutexattr_setpshared(&attr, PTHREAD_PROCESS_SHARED);
     p_attr = &attr;
@@ -131,6 +134,8 @@ static inline int mt_pthread_cond_signal(pthread_cond_t* cond) {
 
 static inline bool mt_socket_match(int cpu_socket, int dev_socket) {
 #ifdef WINDOWSENV
+  MTL_MAY_UNUSED(cpu_socket);
+  MTL_MAY_UNUSED(dev_socket);
   return true;  // windows cpu socket always 0
 #else
   return (cpu_socket == dev_socket);

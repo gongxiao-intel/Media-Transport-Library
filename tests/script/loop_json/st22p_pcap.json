@@ -12,7 +12,7 @@
 	"tx_sessions": [
         {
             "dip": [
-                "192.168.17.102"
+                "local:1"
             ],
             "interface": [
                 0
@@ -36,7 +36,7 @@
     "rx_sessions": [
         {
             "ip": [
-                "192.168.17.101"
+                "local:0"
             ],
             "interface": [
                 1
@@ -46,13 +46,14 @@
                     "replicas": 1,
                     "start_port": 20000,
                     "payload_type": 112,
-                    "width": 3840,
-                    "height": 2160,
+                    "width": 1920,
+                    "height": 1080,
                     "fps": "p59",
                     "codec": "JPEG-XS",
                     "device": "AUTO",
                     "pack_type": "codestream",
-                    "output_format": "BGRA",
+                    "output_format": "YUV422RFC4175PG2BE10",
+                    "codec_thread_count" : 2,
                     "display": false
                 }
             ]

@@ -3,8 +3,6 @@
 
 sources = files(
   'mt_main.c',
-  'mt_dev.c',
-  'mt_queue.c',
   'mt_sch.c',
   'mt_cni.c',
   'mt_ptp.c',
@@ -17,13 +15,10 @@ sources = files(
   'mt_config.c',
   'mt_socket.c',
   'mt_stat.c',
-  'mt_shared_queue.c',
-  'mt_shared_rss.c'
+  'mt_rtcp.c',
+  'mt_flow.c',
+  'mt_instance.c',
 )
-
-if get_option('enable_kni') == true
-  sources += files('mt_kni.c')
-endif
 
 if is_windows
 if get_option('enable_tap') == true
@@ -32,5 +27,8 @@ endif
   sources += files('../windows/win_posix.c')
 endif
 
+subdir('datapath')
+subdir('dev')
 subdir('st2110')
 subdir('udp')
+

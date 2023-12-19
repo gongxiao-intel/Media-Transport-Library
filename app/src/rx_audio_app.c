@@ -24,7 +24,11 @@ static int app_rx_audio_open_source(struct st_app_rx_audio_session* session) {
     return 0;
   }
 
-  fstat(fd, &i);
+  if (fstat(fd, &i) < 0) {
+    err("%s, fstat %s fail\n", __func__, session->st30_ref_url);
+    close(fd);
+    return -EIO;
+  }
   uint8_t* m = mmap(NULL, i.st_size, PROT_READ, MAP_SHARED, fd, 0);
   if (MAP_FAILED == m) {
     err("%s(%d), mmap %s fail\n", __func__, idx, session->st30_ref_url);
@@ -59,14 +63,15 @@ static int app_rx_audio_compare_with_ref(struct st_app_rx_audio_session* session
 
     if (ret) {
       if (!rewind) {
-        info("%s bad audio...rewinding...\n", __func__);
+        info("%s(%d), bad audio...rewinding...\n", __func__, session->idx);
         rewind = true;
       }
       count++;
     }
     if (session->st30_ref_cursor == old_ref) {
       if (ret) {
-        err("%s, bad audio reference file, stop referencing\n", __func__);
+        err("%s(%d), bad audio reference file, stop referencing\n", __func__,
+            session->idx);
         app_rx_audio_close_source(session);
         return ret;
       } else {
@@ -75,7 +80,7 @@ static int app_rx_audio_compare_with_ref(struct st_app_rx_audio_session* session
     }
   }
   if (rewind) {
-    info("%s audio rewind %d\n", __func__, count);
+    info("%s(%d) audio rewind %d\n", __func__, session->idx, count);
   }
 
   return 0;
@@ -134,12 +139,17 @@ static int app_rx_audio_init_rtp_thread(struct st_app_rx_audio_session* s) {
     return -EIO;
   }
 
+  char thread_name[32];
+  snprintf(thread_name, sizeof(thread_name), "rx_audio_%d", idx);
+  mtl_thread_setname(s->st30_app_thread, thread_name);
+
   return 0;
 }
 
 static int app_rx_audio_frame_done(void* priv, void* frame,
                                    struct st30_rx_frame_meta* meta) {
   struct st_app_rx_audio_session* s = priv;
+  MTL_MAY_UNUSED(meta);
 
   if (!s->handle) return -EIO;
 
@@ -221,18 +231,25 @@ static int app_rx_audio_init(struct st_app_context* ctx, st_json_audio_session_t
          audio ? st_json_ip(ctx, &audio->base, MTL_SESSION_PORT_P)
                : ctx->rx_sip_addr[MTL_PORT_P],
          MTL_IP_ADDR_LEN);
-  strncpy(ops.port[MTL_SESSION_PORT_P],
-          audio ? audio->base.inf[MTL_SESSION_PORT_P]->name : ctx->para.port[MTL_PORT_P],
-          MTL_PORT_MAX_LEN);
+  memcpy(
+      ops.mcast_sip_addr[MTL_SESSION_PORT_P],
+      audio ? audio->base.mcast_src_ip[MTL_PORT_P] : ctx->rx_mcast_sip_addr[MTL_PORT_P],
+      MTL_IP_ADDR_LEN);
+  snprintf(
+      ops.port[MTL_SESSION_PORT_P], MTL_PORT_MAX_LEN, "%s",
+      audio ? audio->base.inf[MTL_SESSION_PORT_P]->name : ctx->para.port[MTL_PORT_P]);
   ops.udp_port[MTL_SESSION_PORT_P] = audio ? audio->base.udp_port : (10100 + s->idx);
   if (ops.num_port > 1) {
     memcpy(ops.sip_addr[MTL_SESSION_PORT_R],
            audio ? st_json_ip(ctx, &audio->base, MTL_SESSION_PORT_R)
                  : ctx->rx_sip_addr[MTL_PORT_R],
            MTL_IP_ADDR_LEN);
-    strncpy(ops.port[MTL_SESSION_PORT_R],
-            audio ? audio->base.inf[MTL_PORT_R]->name : ctx->para.port[MTL_PORT_R],
-            MTL_PORT_MAX_LEN);
+    memcpy(
+        ops.mcast_sip_addr[MTL_SESSION_PORT_R],
+        audio ? audio->base.mcast_src_ip[MTL_PORT_R] : ctx->rx_mcast_sip_addr[MTL_PORT_R],
+        MTL_IP_ADDR_LEN);
+    snprintf(ops.port[MTL_SESSION_PORT_R], MTL_PORT_MAX_LEN, "%s",
+             audio ? audio->base.inf[MTL_PORT_R]->name : ctx->para.port[MTL_PORT_R]);
     ops.udp_port[MTL_SESSION_PORT_R] = audio ? audio->base.udp_port : (10100 + s->idx);
   }
   ops.notify_frame_ready = app_rx_audio_frame_done;
@@ -243,29 +260,34 @@ static int app_rx_audio_init(struct st_app_context* ctx, st_json_audio_session_t
   ops.channel = audio ? audio->info.audio_channel : 2;
   ops.sampling = audio ? audio->info.audio_sampling : ST30_SAMPLING_48K;
   ops.ptime = audio ? audio->info.audio_ptime : ST30_PTIME_1MS;
-  ops.sample_size = st30_get_sample_size(ops.fmt);
-  ops.sample_num = st30_get_sample_num(ops.ptime, ops.sampling);
-  s->pkt_len = ops.sample_size * ops.sample_num * ops.channel;
-  if (ops.ptime == ST30_PTIME_4MS) {
-    s->st30_frame_size =
-        ops.sample_size * st30_get_sample_num(ST30_PTIME_4MS, ops.sampling) * ops.channel;
-    s->expect_fps = 250.0;
-  } else {
-    /* when ptime <= 1ms, set frame time to 1ms */
-    s->st30_frame_size =
-        ops.sample_size * st30_get_sample_num(ST30_PTIME_1MS, ops.sampling) * ops.channel;
-    s->expect_fps = 1000.0;
+  s->pkt_len = st30_get_packet_size(ops.fmt, ops.ptime, ops.sampling, ops.channel);
+  if (s->pkt_len < 0) {
+    err("%s(%d), st30_get_packet_size fail\n", __func__, idx);
+    app_rx_audio_uinit(s);
+    return -EIO;
   }
+  int pkt_per_frame = 1;
+
+  double pkt_time = st30_get_packet_time(ops.ptime);
+  /* when ptime <= 1ms, set frame time to 1ms */
+  if (pkt_time < NS_PER_MS) {
+    pkt_per_frame = NS_PER_MS / pkt_time;
+  }
+
+  s->st30_frame_size = pkt_per_frame * s->pkt_len;
+  s->expect_fps = (double)NS_PER_S / st30_get_packet_time(ops.ptime) / pkt_per_frame;
 
   ops.framebuff_size = s->st30_frame_size;
   ops.framebuff_cnt = s->framebuff_cnt;
   ops.rtp_ring_size = ctx->rx_audio_rtp_ring_size ? ctx->rx_audio_rtp_ring_size : 16;
+  if (audio && audio->enable_rtcp) ops.flags |= ST30_RX_FLAG_ENABLE_RTCP;
+  if (ctx->enable_timing_parser) ops.flags |= ST30_RX_FLAG_ENABLE_TIMING_PARSER;
 
   st_pthread_mutex_init(&s->st30_wake_mutex, NULL);
   st_pthread_cond_init(&s->st30_wake_cond, NULL);
 
-  strncpy(s->st30_ref_url, audio ? audio->info.audio_url : "null",
-          sizeof(s->st30_ref_url));
+  snprintf(s->st30_ref_url, sizeof(s->st30_ref_url), "%s",
+           audio ? audio->info.audio_url : "null");
 
   ret = app_rx_audio_open_source(s);
   if (ret < 0) {

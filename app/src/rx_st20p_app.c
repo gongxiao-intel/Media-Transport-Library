@@ -17,6 +17,23 @@ static int app_rx_st20p_frame_available(void* priv) {
 static void app_rx_st20p_consume_frame(struct st_app_rx_st20p_session* s,
                                        struct st_frame* frame) {
   struct st_display* d = s->display;
+  int idx = s->idx;
+
+  if (s->num_port > 1) {
+    dbg("%s(%d): pkts_total %u, pkts per port P %u R %u\n", __func__, idx,
+        frame->pkts_total, frame->pkts_recv[MTL_SESSION_PORT_P],
+        frame->pkts_recv[MTL_SESSION_PORT_R]);
+    if (frame->pkts_recv[MTL_SESSION_PORT_P] < (frame->pkts_total / 2))
+      warn("%s(%d): P port only receive %u pkts while total pkts is %u\n", __func__, idx,
+           frame->pkts_recv[MTL_SESSION_PORT_P], frame->pkts_total);
+    if (frame->pkts_recv[MTL_SESSION_PORT_R] < (frame->pkts_total / 2))
+      warn("%s(%d): R port only receive %u pkts while total pkts is %u\n", __func__, idx,
+           frame->pkts_recv[MTL_SESSION_PORT_R], frame->pkts_total);
+  }
+
+  if (frame->interlaced) {
+    dbg("%s(%d), %s field\n", __func__, s->idx, frame->second_field ? "second" : "first");
+  }
 
   if (d && d->front_frame) {
     if (st_pthread_mutex_trylock(&d->display_frame_mutex) == 0) {
@@ -40,6 +57,8 @@ static void app_rx_st20p_consume_frame(struct st_app_rx_st20p_session* s,
 static void* app_rx_st20p_frame_thread(void* arg) {
   struct st_app_rx_st20p_session* s = arg;
   struct st_frame* frame;
+  uint8_t shas[SHA256_DIGEST_LENGTH];
+  int idx = s->idx;
 
   info("%s(%d), start\n", __func__, s->idx);
   while (!s->st20p_app_thread_stop) {
@@ -70,6 +89,19 @@ static void* app_rx_st20p_frame_thread(void* arg) {
     }
 
     app_rx_st20p_consume_frame(s, frame);
+    if (s->sha_check) {
+      if (frame->user_meta_size != sizeof(shas)) {
+        err("%s(%d), invalid user meta size %" PRId64 "\n", __func__, idx,
+            frame->user_meta_size);
+      } else {
+        st_sha256((unsigned char*)frame->addr[0], st_frame_plane_size(frame, 0), shas);
+        if (memcmp(shas, frame->user_meta, sizeof(shas))) {
+          err("%s(%d), sha check fail for frame %p\n", __func__, idx, frame->addr);
+          st_sha_dump("user meta sha:", frame->user_meta);
+          st_sha_dump("frame sha:", shas);
+        }
+      }
+    }
     s->stat_frame_total_received++;
     if (!s->stat_frame_first_rx_time)
       s->stat_frame_first_rx_time = st_app_get_monotonic_time();
@@ -88,6 +120,10 @@ static int app_rx_st20p_init_frame_thread(struct st_app_rx_st20p_session* s) {
     err("%s(%d), st20p_app_thread create fail %d\n", __func__, ret, idx);
     return -EIO;
   }
+
+  char thread_name[32];
+  snprintf(thread_name, sizeof(thread_name), "rx_st20p_%d", idx);
+  mtl_thread_setname(s->st20p_app_thread, thread_name);
 
   return 0;
 }
@@ -123,6 +159,30 @@ static int app_rx_st20p_uinit(struct st_app_rx_st20p_session* s) {
   return 0;
 }
 
+static int app_rx_st20p_io_stat(struct st_app_rx_st20p_session* s) {
+  int idx = s->idx;
+  uint64_t cur_time = st_app_get_monotonic_time();
+  double time_sec = (double)(cur_time - s->last_stat_time_ns) / NS_PER_S;
+  double tx_rate_m, fps;
+  int ret;
+  struct st20_rx_port_status stats;
+
+  if (!s->handle) return 0;
+
+  for (uint8_t port = 0; port < s->num_port; port++) {
+    ret = st20p_rx_get_port_stats(s->handle, port, &stats);
+    if (ret < 0) return ret;
+    tx_rate_m = (double)stats.bytes * 8 / time_sec / MTL_STAT_M_UNIT;
+    fps = (double)stats.frames / time_sec;
+
+    info("%s(%d,%u), rx %f Mb/s fps %f\n", __func__, idx, port, tx_rate_m, fps);
+    st20p_rx_reset_port_stats(s->handle, port);
+  }
+
+  s->last_stat_time_ns = cur_time;
+  return 0;
+}
+
 static int app_rx_st20p_init(struct st_app_context* ctx,
                              struct st_json_st20p_session* st20p,
                              struct st_app_rx_st20p_session* s) {
@@ -132,6 +192,9 @@ static int app_rx_st20p_init(struct st_app_context* ctx,
   st20p_rx_handle handle;
   memset(&ops, 0, sizeof(ops));
 
+  s->last_stat_time_ns = st_app_get_monotonic_time();
+  s->sha_check = ctx->video_sha_check;
+
   snprintf(name, 32, "app_rx_st20p_%d", idx);
   ops.name = name;
   ops.priv = s;
@@ -140,19 +203,26 @@ static int app_rx_st20p_init(struct st_app_context* ctx,
          st20p ? st_json_ip(ctx, &st20p->base, MTL_SESSION_PORT_P)
                : ctx->rx_sip_addr[MTL_PORT_P],
          MTL_IP_ADDR_LEN);
-  strncpy(ops.port.port[MTL_SESSION_PORT_P],
-          st20p ? st20p->base.inf[MTL_SESSION_PORT_P]->name : ctx->para.port[MTL_PORT_P],
-          MTL_PORT_MAX_LEN);
+  memcpy(
+      ops.port.mcast_sip_addr[MTL_SESSION_PORT_P],
+      st20p ? st20p->base.mcast_src_ip[MTL_PORT_P] : ctx->rx_mcast_sip_addr[MTL_PORT_P],
+      MTL_IP_ADDR_LEN);
+  snprintf(
+      ops.port.port[MTL_SESSION_PORT_P], MTL_PORT_MAX_LEN, "%s",
+      st20p ? st20p->base.inf[MTL_SESSION_PORT_P]->name : ctx->para.port[MTL_PORT_P]);
   ops.port.udp_port[MTL_SESSION_PORT_P] = st20p ? st20p->base.udp_port : (10000 + s->idx);
   if (ops.port.num_port > 1) {
     memcpy(ops.port.sip_addr[MTL_SESSION_PORT_R],
            st20p ? st_json_ip(ctx, &st20p->base, MTL_SESSION_PORT_R)
                  : ctx->rx_sip_addr[MTL_PORT_R],
            MTL_IP_ADDR_LEN);
-    strncpy(
-        ops.port.port[MTL_SESSION_PORT_R],
-        st20p ? st20p->base.inf[MTL_SESSION_PORT_R]->name : ctx->para.port[MTL_PORT_R],
-        MTL_PORT_MAX_LEN);
+    memcpy(
+        ops.port.mcast_sip_addr[MTL_SESSION_PORT_R],
+        st20p ? st20p->base.mcast_src_ip[MTL_PORT_R] : ctx->rx_mcast_sip_addr[MTL_PORT_R],
+        MTL_IP_ADDR_LEN);
+    snprintf(
+        ops.port.port[MTL_SESSION_PORT_R], MTL_PORT_MAX_LEN, "%s",
+        st20p ? st20p->base.inf[MTL_SESSION_PORT_R]->name : ctx->para.port[MTL_PORT_R]);
     ops.port.udp_port[MTL_SESSION_PORT_R] =
         st20p ? st20p->base.udp_port : (10000 + s->idx);
   }
@@ -169,12 +239,15 @@ static int app_rx_st20p_init(struct st_app_context* ctx,
   ops.framebuff_cnt = s->framebuff_cnt;
   /* always try to enable DMA offload */
   ops.flags = ST20P_RX_FLAG_DMA_OFFLOAD;
+  if (st20p && st20p->enable_rtcp) ops.flags |= ST20P_RX_FLAG_ENABLE_RTCP;
+  if (ctx->enable_timing_parser) ops.flags |= ST20P_RX_FLAG_ENABLE_TIMING_PARSER;
 
   st_pthread_mutex_init(&s->st20p_wake_mutex, NULL);
   st_pthread_cond_init(&s->st20p_wake_cond, NULL);
 
   s->width = ops.width;
   s->height = ops.height;
+  s->num_port = ops.port.num_port;
 
   s->pcapng_max_pkts = ctx->pcapng_max_pkts;
   s->expect_fps = st_frame_rate(ops.fps);
@@ -332,4 +405,17 @@ int st_app_rx_st20p_sessions_pcap(struct st_app_context* ctx) {
   }
 
   return 0;
+}
+
+int st_app_rx_st20p_io_stat(struct st_app_context* ctx) {
+  int i, ret = 0;
+  struct st_app_rx_st20p_session* s;
+  if (!ctx->rx_st20p_sessions) return 0;
+
+  for (i = 0; i < ctx->rx_st20p_session_cnt; i++) {
+    s = &ctx->rx_st20p_sessions[i];
+    ret += app_rx_st20p_io_stat(s);
+  }
+
+  return ret;
 }

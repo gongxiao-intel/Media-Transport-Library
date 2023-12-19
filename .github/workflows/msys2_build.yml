@@ -1,5 +1,15 @@
 name: Windows MSYS2 build
-on: [push, pull_request, workflow_call]
+
+on:
+  push:
+    branches:
+      - main
+      - 'maint-**'
+  pull_request:
+    branches:
+      - main
+      - 'maint-**'
+  workflow_call:
 
 env:
   # FIXME: For some reason enabling jit debugging "fixes" random python crashes
@@ -11,7 +21,23 @@ permissions:
   contents: read
 
 jobs:
+  changes:
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+    outputs:
+      changed: ${{ steps.filter.outputs.msys2_build == 'true' }}
+    steps:
+      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+      
+      - uses: dorny/paths-filter@4512585405083f25c027a35db413c2b3b9006d50 # v2
+        id: filter
+        with:
+          filters: .github/path_filters.yml
+
   build:
+    needs: changes
+    if: ${{ github.repository == 'OpenVisualCloud/Media-Transport-Library' && needs.changes.outputs.changed == 'true' }}
     runs-on: windows-latest
     strategy:
       fail-fast: false
@@ -19,90 +45,121 @@ jobs:
         sys:
           - mingw64
           - ucrt64
-        dpdk: [22.11, 23.03]
+        dpdk: [23.11, 23.07]
     defaults:
       run:
         shell: msys2 {0}
     steps:
-    - name: Harden Runner
-      uses: step-security/harden-runner@55d479fb1c5bcad5a4f9099a5d9f37c8857b2845 # v2.4.1
-      with:
-        egress-policy: audit
+      - name: Harden Runner
+        uses: step-security/harden-runner@eb238b55efaa70779f274895e782ed17c84f2895 # v2.6.1
+        with:
+          egress-policy: audit
 
-    - name: Install dependencies
-      uses: msys2/setup-msys2@7efe20baefed56359985e327d329042cde2434ff # v2
-      with:
-        msystem: ${{matrix.sys}}
-        update: true
-        install: >-
-          git
-          base-devel
-          unzip
-        pacboy: >-
-          openssl:p
-          gcc:p
-          meson:p
-          pkg-config:p
-          json-c:p
-          libpcap:p
-          gtest:p
-          SDL2:p
-          SDL2_ttf:p
-          dlfcn:p
+      - name: Install dependencies
+        uses: msys2/setup-msys2@7efe20baefed56359985e327d329042cde2434ff # v2
+        with:
+          msystem: ${{ matrix.sys }}
+          update: true
+          install: >-
+            git
+            base-devel
+            unzip
+          pacboy: >-
+            pkgconf:p
+            openssl:p
+            gcc:p
+            meson:p
+            json-c:p
+            libpcap:p
+            gtest:p
+            SDL2:p
+            SDL2_ttf:p
+            dlfcn:p
 
-    - name: Install tools
-      run: |
-        wget https://nmap.org/npcap/dist/npcap-sdk-1.12.zip
-        unzip -d npcap-sdk npcap-sdk-1.12.zip
-        cp npcap-sdk/Lib/x64/* $MSYSTEM_PREFIX/lib/
-        git clone https://github.com/alitrack/mman-win32
-        cd mman-win32
-        ./configure --prefix=$MSYSTEM_PREFIX
-        make && make install
+      - name: Install npcap-sdk
+        run: |
+          wget https://nmap.org/npcap/dist/npcap-sdk-1.12.zip
+          unzip -d npcap-sdk npcap-sdk-1.12.zip
+          cp npcap-sdk/Lib/x64/* ${MSYSTEM_PREFIX}/lib/
 
-    - name: Checkout IMTL repo
-      uses: actions/checkout@c85c95e3d7251135ab7dc9ce3241c5835cc595a9 # v3.5.3
+      - name: Checkout IMTL code
+        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
 
-    - name: Checkout DPDK repo
-      uses: actions/checkout@c85c95e3d7251135ab7dc9ce3241c5835cc595a9 # v3.5.3
-      with:
-        repository: 'DPDK/dpdk'
-        ref: v${{matrix.dpdk}}
-        path: dpdk
-        clean: true
+      - name: Checkout mman-win32 code
+        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+        with:
+          repository: 'alitrack/mman-win32'
+          ref: master
+          path: mman-win32
 
-    - name: Convert symlink patch files to real file
-      run: |
-        cd patches/dpdk/${{matrix.dpdk}}
-        ls *.patch | xargs -I{} bash -c 'if [[ $(sed -n '1p' "{}") =~ ^../.*\.patch$ ]]; then cp "$(cat "{}")" "{}"; fi'
-        cd windows
-        ls *.patch | xargs -I{} bash -c 'if [[ $(sed -n '1p' "{}") =~ ^../.*\.patch$ ]]; then cp "$(cat "{}")" "{}"; fi'
-    
-    - name: Apply patches for DPDK
-      shell: bash
-      run: |
-        cd dpdk
-        git config user.name github-actions
-        git config user.email github-actions@github.com
-        git am ../patches/dpdk/${{matrix.dpdk}}/*.patch
-        git am ../patches/dpdk/${{matrix.dpdk}}/windows/*.patch
+      - name: Build and install mman-win32
+        run: |
+          cd mman-win32
+          ./configure --prefix=${MSYSTEM_PREFIX}
+          make -j$(nproc) && make install
 
-    - name: Build dpdk
-      run: |
-        cd dpdk
-        meson setup build
-        meson install -C build
+      - name: Convert patches for DPDK
+        run: |
+          cd patches/dpdk/${{matrix.dpdk}}
+          ls *.patch | xargs -I{} bash -c 'if [[ $(sed -n '1p' "{}") =~ ^../.*\.patch$ ]]; then cp "$(cat "{}")" "{}"; fi'
+          cd windows
+          ls *.patch | xargs -I{} bash -c 'if [[ $(sed -n '1p' "{}") =~ ^../.*\.patch$ ]]; then cp "$(cat "{}")" "{}"; fi'
 
-    - name: Build
-      run: |
-        ./build.sh
+      - name: Hash DPDK patches
+        id: hash-patches
+        run: |
+          HASH=$(sha1sum patches/dpdk/${{matrix.dpdk}}/*.patch patches/dpdk/${{matrix.dpdk}}/windows/*.patch | sha1sum | cut -d" " -f1)
+          echo "hash=${HASH}"  >> $GITHUB_OUTPUT
 
-    - name: Build with debug
-      run: |
-        rm build -rf
-        ./build.sh debugonly
+      - name: Cache DPDK
+        id: cache-dpdk
+        uses: actions/cache@704facf57e6136b1bc63b828d79edcd491f0ee84 # v3.3.2
+        with:
+          path: dpdk
+          key: dpdk-${{ matrix.dpdk }}-${{ matrix.sys }}-${{ steps.hash-patches.outputs.hash }}
 
-    - name: Build with TAP
-      run: |
-        meson setup tap_build -Denable_tap=true
-        meson install -C tap_build
+      - name: Checkout DPDK code
+        if: ${{ steps.cache-dpdk.outputs.cache-hit != 'true' }}
+        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+        with:
+          repository: 'DPDK/dpdk'
+          ref: v${{matrix.dpdk}}
+          path: dpdk
+          clean: true
+
+      - name: Apply patches for DPDK
+        if: ${{ steps.cache-dpdk.outputs.cache-hit != 'true' }}
+        shell: bash
+        run: |
+          cd dpdk
+          git config user.name github-actions
+          git config user.email github-actions@github.com
+          git am ../patches/dpdk/${{matrix.dpdk}}/*.patch
+          git am ../patches/dpdk/${{matrix.dpdk}}/windows/*.patch
+
+      - name: Build and install DPDK
+        if: ${{ steps.cache-dpdk.outputs.cache-hit != 'true' }}
+        run: |
+          cd dpdk
+          meson setup build -Dplatform=generic
+          meson install -C build
+
+      - name: Install cached DPDK
+        if: ${{ steps.cache-dpdk.outputs.cache-hit == 'true' }}
+        run: |
+          cd dpdk
+          meson install -C build --no-rebuild
+
+      - name: Build
+        run: |
+          ./build.sh
+
+      - name: Build with debug
+        run: |
+          rm build -rf
+          ./build.sh debugonly
+
+      - name: Build with TAP
+        run: |
+          meson setup tap_build -Denable_tap=true
+          meson install -C tap_build

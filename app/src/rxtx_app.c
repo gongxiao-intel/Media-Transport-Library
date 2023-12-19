@@ -28,13 +28,107 @@
 static struct st_app_context* g_app_ctx; /* only for st_app_sig_handler */
 static enum mtl_log_level app_log_level;
 
+static int app_dump_io_stat(struct st_app_context* ctx) {
+  struct mtl_fix_info fix;
+  struct mtl_port_status stats;
+  int ret;
+  double time_sec =
+      (double)(st_app_get_monotonic_time() - ctx->last_stat_time_ns) / NS_PER_S;
+  double tx_rate_m, rx_rate_m;
+
+  ret = mtl_get_fix_info(ctx->st, &fix);
+  if (ret < 0) return ret;
+
+  for (uint8_t port = 0; port < fix.num_ports; port++) {
+    ret = mtl_get_port_stats(ctx->st, port, &stats);
+    if (ret < 0) return ret;
+    tx_rate_m = (double)stats.tx_bytes * 8 / time_sec / MTL_STAT_M_UNIT;
+    rx_rate_m = (double)stats.rx_bytes * 8 / time_sec / MTL_STAT_M_UNIT;
+    info("%s(%u), tx %f Mb/s rx %f Mb/s\n", __func__, port, tx_rate_m, rx_rate_m);
+    if (stats.rx_hw_dropped_packets || stats.rx_err_packets || stats.rx_nombuf_packets ||
+        stats.tx_err_packets) {
+      warn("%s(%u), hw drop %" PRIu64 " rx err %" PRIu64 " no mbuf %" PRIu64
+           " tx err %" PRIu64 "\n",
+           __func__, port, stats.rx_hw_dropped_packets, stats.rx_err_packets,
+           stats.rx_nombuf_packets, stats.tx_err_packets);
+    }
+    mtl_reset_port_stats(ctx->st, port);
+  }
+
+  return 0;
+}
+
+static int app_dump_ptp_sync_stat(struct st_app_context* ctx) {
+  info("%s, cnt %d max %" PRId64 " min %" PRId64 " average %fus\n", __func__,
+       ctx->ptp_sync_cnt, ctx->ptp_sync_delta_max, ctx->ptp_sync_delta_min,
+       (float)ctx->ptp_sync_delta_sum / ctx->ptp_sync_cnt / NS_PER_US);
+  ctx->ptp_sync_delta_sum = 0;
+  ctx->ptp_sync_cnt = 0;
+  ctx->ptp_sync_delta_max = INT64_MIN;
+  ctx->ptp_sync_delta_min = INT64_MAX;
+  return 0;
+}
+
 static void app_stat(void* priv) {
   struct st_app_context* ctx = priv;
+
+  if (ctx->stop) return;
+
+  if (ctx->mtl_log_stream) {
+    app_dump_io_stat(ctx);
+    st_app_tx_videos_io_stat(ctx);
+    st_app_rx_videos_io_stat(ctx);
+    st_app_tx_st20p_io_stat(ctx);
+    st_app_rx_st20p_io_stat(ctx);
+  }
 
   st_app_rx_video_sessions_stat(ctx);
   st_app_rx_st22p_sessions_stat(ctx);
   st_app_rx_st20p_sessions_stat(ctx);
   st_app_rx_st20r_sessions_stat(ctx);
+
+  if (ctx->ptp_systime_sync) {
+    app_dump_ptp_sync_stat(ctx);
+  }
+
+  ctx->last_stat_time_ns = st_app_get_monotonic_time();
+}
+
+static void app_ptp_sync_notify(void* priv, struct mtl_ptp_sync_notify_meta* meta) {
+  struct st_app_context* ctx = priv;
+  if (!ctx->ptp_systime_sync) return;
+
+  /* sync raw ptp to sys time */
+  uint64_t to_ns = mtl_ptp_read_time_raw(ctx->st);
+  int ret;
+  struct timespec from_ts, to_ts;
+  st_get_real_time(&from_ts);
+  from_ts.tv_sec += meta->master_utc_offset; /* utc offset */
+  uint64_t from_ns = st_timespec_to_ns(&from_ts);
+
+  /* record the sync delta */
+  int64_t delta = to_ns - from_ns;
+  ctx->ptp_sync_cnt++;
+  ctx->ptp_sync_delta_sum += delta;
+  if (delta > ctx->ptp_sync_delta_max) ctx->ptp_sync_delta_max = delta;
+  if (delta < ctx->ptp_sync_delta_min) ctx->ptp_sync_delta_min = delta;
+
+  /* sample just offset the system time delta, better to calibrate as phc2sys way which
+   * adjust the time frequency also  */
+  st_ns_to_timespec(to_ns, &to_ts);
+  to_ts.tv_sec -= meta->master_utc_offset; /* utc offset */
+  ret = st_set_real_time(&to_ts);
+  if (ret < 0) {
+    err("%s, set real time to %" PRIu64 " fail, delta %" PRId64 "\n", __func__, to_ns,
+        delta);
+    if (ret == -EPERM)
+      err("%s, please add capability to the app: sudo setcap 'cap_sys_time+ep' <app>\n",
+          __func__);
+  }
+
+  dbg("%s, from_ns %" PRIu64 " to_ns %" PRIu64 " delta %" PRId64 " done\n", __func__,
+      from_ns, to_ns, delta);
+  return;
 }
 
 void app_set_log_level(enum mtl_log_level level) { app_log_level = level; }
@@ -44,7 +138,7 @@ enum mtl_log_level app_get_log_level(void) { return app_log_level; }
 static uint64_t app_ptp_from_tai_time(void* priv) {
   struct st_app_context* ctx = priv;
   struct timespec spec;
-  st_getrealtime(&spec);
+  st_get_real_time(&spec);
   spec.tv_sec -= ctx->utc_offset;
   return ((uint64_t)spec.tv_sec * NS_PER_S) + spec.tv_nsec;
 }
@@ -77,17 +171,17 @@ static void st_app_ctx_init(struct st_app_context* ctx) {
   user_param_init(ctx, &ctx->para);
 
   /* tx */
-  strncpy(ctx->tx_video_url, "test.yuv", sizeof(ctx->tx_video_url));
+  snprintf(ctx->tx_video_url, sizeof(ctx->tx_video_url), "%s", "test.yuv");
   ctx->tx_video_session_cnt = 0;
-  strncpy(ctx->tx_audio_url, "test.wav", sizeof(ctx->tx_audio_url));
+  snprintf(ctx->tx_audio_url, sizeof(ctx->tx_audio_url), "%s", "test.wav");
   ctx->tx_audio_session_cnt = 0;
-  strncpy(ctx->tx_anc_url, "test.txt", sizeof(ctx->tx_anc_url));
+  snprintf(ctx->tx_anc_url, sizeof(ctx->tx_anc_url), "%s", "test.txt");
   ctx->tx_anc_session_cnt = 0;
-  strncpy(ctx->tx_st22_url, "test.raw", sizeof(ctx->tx_st22_url));
+  snprintf(ctx->tx_st22_url, sizeof(ctx->tx_st22_url), "%s", "test.raw");
   ctx->tx_st22_session_cnt = 0;
-  strncpy(ctx->tx_st22p_url, "test_rfc4175.yuv", sizeof(ctx->tx_st22p_url));
+  snprintf(ctx->tx_st22p_url, sizeof(ctx->tx_st22p_url), "%s", "test_rfc4175.yuv");
   ctx->tx_st22p_session_cnt = 0;
-  strncpy(ctx->tx_st20p_url, "test_rfc4175.yuv", sizeof(ctx->tx_st20p_url));
+  snprintf(ctx->tx_st20p_url, sizeof(ctx->tx_st20p_url), "%s", "test_rfc4175.yuv");
   ctx->tx_st20p_session_cnt = 0;
 
   /* rx */
@@ -104,11 +198,16 @@ static void st_app_ctx_init(struct st_app_context* ctx) {
 
   ctx->utc_offset = UTC_OFFSET;
 
+  ctx->ptp_sync_delta_min = INT64_MAX;
+  ctx->ptp_sync_delta_max = INT64_MIN;
+
   /* init lcores and sch */
   for (int i = 0; i < ST_APP_MAX_LCORES; i++) {
     ctx->lcore[i] = -1;
     ctx->rtp_lcore[i] = -1;
   }
+
+  ctx->last_stat_time_ns = st_app_get_monotonic_time();
 }
 
 int st_app_video_get_lcore(struct st_app_context* ctx, int sch_idx, bool rtp,
@@ -141,6 +240,15 @@ int st_app_video_get_lcore(struct st_app_context* ctx, int sch_idx, bool rtp,
     *lcore = ctx->rtp_lcore[sch_idx];
   else
     *lcore = ctx->lcore[sch_idx];
+  return 0;
+}
+
+static int st_mtl_log_file_free(struct st_app_context* ctx) {
+  if (ctx->mtl_log_stream) {
+    fclose(ctx->mtl_log_stream);
+    ctx->mtl_log_stream = NULL;
+  }
+
   return 0;
 }
 
@@ -185,6 +293,7 @@ static void st_app_ctx_free(struct st_app_context* ctx) {
   }
 
   st_app_player_uinit(ctx);
+  st_mtl_log_file_free(ctx);
   st_app_free(ctx);
 }
 
@@ -264,25 +373,43 @@ int main(int argc, char** argv) {
   int rx_st20_sessions = ctx->rx_video_session_cnt + ctx->rx_st22_session_cnt +
                          ctx->rx_st22p_session_cnt + ctx->rx_st20p_session_cnt;
   for (int i = 0; i < ctx->para.num_ports; i++) {
-    /* parse queue cnt, todo: split with ports */
+    ctx->para.pmd[i] = mtl_pmd_by_port_name(ctx->para.port[i]);
+
     if (!ctx->para.tx_queues_cnt[i]) {
-      ctx->para.tx_queues_cnt[i] = st_tx_sessions_queue_cnt(
-          tx_st20_sessions, ctx->tx_audio_session_cnt, ctx->tx_anc_session_cnt);
+      if (ctx->json_ctx) {
+        /* get from the assigned sessions on each interface */
+        ctx->para.tx_queues_cnt[i] =
+            st_tx_sessions_queue_cnt(ctx->json_ctx->interfaces[i].tx_video_sessions_cnt,
+                                     ctx->json_ctx->interfaces[i].tx_audio_sessions_cnt,
+                                     ctx->json_ctx->interfaces[i].tx_anc_sessions_cnt);
+      } else {
+        ctx->para.tx_queues_cnt[i] = st_tx_sessions_queue_cnt(
+            tx_st20_sessions, ctx->tx_audio_session_cnt, ctx->tx_anc_session_cnt);
+      }
+      if (ctx->para.pmd[i] == MTL_PMD_DPDK_USER) {
+        ctx->para.tx_queues_cnt[i] += 4; /* add extra 4 queues for recovery */
+      }
     }
     if (!ctx->para.rx_queues_cnt[i]) {
-      ctx->para.rx_queues_cnt[i] = st_rx_sessions_queue_cnt(
-          rx_st20_sessions, ctx->rx_audio_session_cnt, ctx->rx_anc_session_cnt);
+      if (ctx->json_ctx) {
+        /* get from the assigned sessions on each interface */
+        ctx->para.rx_queues_cnt[i] =
+            st_rx_sessions_queue_cnt(ctx->json_ctx->interfaces[i].rx_video_sessions_cnt,
+                                     ctx->json_ctx->interfaces[i].rx_audio_sessions_cnt,
+                                     ctx->json_ctx->interfaces[i].rx_anc_sessions_cnt);
+      } else {
+        ctx->para.rx_queues_cnt[i] = st_rx_sessions_queue_cnt(
+            rx_st20_sessions, ctx->rx_audio_session_cnt, ctx->rx_anc_session_cnt);
+      }
     }
-    /* parse af xdp pmd info */
-    ctx->para.pmd[i] = mtl_pmd_by_port_name(ctx->para.port[i]);
-    ctx->para.xdp_info[i].queue_count =
-        ST_MAX(ctx->para.tx_queues_cnt[i], ctx->para.rx_queues_cnt[i]);
   }
 
   /* hdr split special */
   if (ctx->enable_hdr_split) {
     ctx->para.nb_rx_hdr_split_queues = ctx->rx_video_session_cnt;
   }
+
+  if (ctx->ptp_systime_sync) ctx->para.ptp_sync_notify = app_ptp_sync_notify;
 
   ctx->st = mtl_init(&ctx->para);
   if (!ctx->st) {
@@ -420,6 +547,7 @@ int main(int argc, char** argv) {
   }
 
   test_time_s = ctx->test_time_s;
+  mtl_thread_setname(pthread_self(), "RxTxApp_main");
   info("%s, app lunch succ, test time %ds\n", __func__, test_time_s);
   while (!ctx->stop) {
     sleep(1);
@@ -442,4 +570,33 @@ int main(int argc, char** argv) {
   st_app_ctx_free(ctx);
 
   return ret;
+}
+
+int st_set_mtl_log_file(struct st_app_context* ctx, const char* file) {
+  FILE* f = fopen(file, "w");
+  if (!f) {
+    err("%s, fail(%s) to open %s\n", __func__, strerror(errno), file);
+    return -EIO;
+  }
+
+  /* close any log file */
+  st_mtl_log_file_free(ctx);
+
+  int ret = mtl_openlog_stream(f);
+  if (ret < 0) {
+    err("%s, set mtl log stream fail %d\n", __func__, ret);
+    return -EIO;
+  }
+
+  ctx->mtl_log_stream = f;
+  info("%s, succ to %s\n", __func__, file);
+  return 0;
+}
+
+void st_sha_dump(const char* tag, const unsigned char* sha) {
+  if (tag) info("%s, ", tag);
+  for (size_t i = 0; i < SHA256_DIGEST_LENGTH; i++) {
+    info("0x%02x ", sha[i]);
+  }
+  info("\n");
 }

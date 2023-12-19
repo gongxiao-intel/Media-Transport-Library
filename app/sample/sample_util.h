@@ -8,7 +8,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <inttypes.h>
-#include <mtl/st20_redundant_api.h>
+#include <mtl/experimental/st20_combined_api.h>
 #include <mtl/st_convert_api.h>
 #include <mtl/st_pipeline_api.h>
 #include <pthread.h>
@@ -54,6 +54,8 @@
 #define NS_PER_S (1000000000)
 #endif
 
+#define ST_MAX(a, b) ((a) > (b) ? (a) : (b))
+
 enum sample_udp_mode {
   /* client/server mode */
   SAMPLE_UDP_DEFAULT = 0,
@@ -96,8 +98,6 @@ struct st_sample_context {
   uint32_t logo_width;
   uint32_t logo_height;
 
-  enum st_frame_fmt st22p_input_fmt;
-  enum st_frame_fmt st22p_output_fmt;
   enum st22_codec st22p_codec; /* st22 codec */
 
   enum sample_udp_mode udp_mode;
@@ -111,6 +111,13 @@ struct st_sample_context {
   off_t gddr_pa;
   off_t gddr_offset;
   bool use_cpu_copy;
+
+  bool has_user_meta; /* if provide user meta data with the st2110-20 frame */
+};
+
+struct st_frame_user_meta {
+  int idx; /* frame index */
+  char dummy[512];
 };
 
 int sample_parse_args(struct st_sample_context* ctx, int argc, char** argv, bool tx,

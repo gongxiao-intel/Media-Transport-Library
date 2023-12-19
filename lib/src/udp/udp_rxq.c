@@ -4,7 +4,7 @@
 
 #include "udp_rxq.h"
 
-#include "../mt_dev.h"
+#include "../dev/mt_dev.h"
 #include "../mt_log.h"
 #include "../mt_stat.h"
 #include "udp_main.h"
@@ -47,6 +47,7 @@ static uint16_t urq_rx_handle(struct mur_queue* q, struct rte_mbuf** pkts,
       rte_mbuf_refcnt_update(pkts[i], 1);
     } else { /* invalid pkt */
       warn("%s(%u), not udp pkt %u\n", __func__, idx, ipv4->next_proto_id);
+      // mt_mbuf_dump(q->port, i, "urq", pkts[i]);
     }
   }
 
@@ -91,7 +92,7 @@ static uint16_t urq_rx_handle(struct mur_queue* q, struct rte_mbuf** pkts,
     /* hash with ip and port of both src and dst */
     uint32_t tuple[3];
     rte_memcpy(tuple, &hdr->ipv4.src_addr, sizeof(tuple));
-    uint32_t hash = mt_dev_softrss(tuple, 3);
+    uint32_t hash = mt_softrss(tuple, 3);
     int c_idx = hash % clients;
 
     if (c_idx != last_c_idx) {
@@ -256,7 +257,7 @@ static struct mur_queue* urq_get(struct mudp_rxq_mgr* mgr,
   /* create flow */
   struct mt_rxq_flow flow;
   memset(&flow, 0, sizeof(flow));
-  flow.no_ip_flow = true;
+  flow.flags = MT_RXQ_FLOW_F_NO_IP;
   flow.dst_port = dst_port;
   q->rxq = mt_rxq_get(impl, port, &flow);
   if (!q->rxq) {
@@ -346,9 +347,9 @@ static int urc_tasklet_handler(void* priv) {
 }
 
 static int urc_init_tasklet(struct mtl_main_impl* impl, struct mur_client* c) {
-  if (!mt_udp_lcore(impl, c->port)) return 0;
+  if (!mt_user_udp_lcore(impl, c->port)) return 0;
 
-  struct mt_sch_tasklet_ops ops;
+  struct mtl_tasklet_ops ops;
   char name[32];
   snprintf(name, 32, "%sP%dDP%dQ%uC%d", MT_UDP_RXQ_PREFIX, c->port, c->dst_port,
            c->q->rxq_id, c->idx);
@@ -358,7 +359,7 @@ static int urc_init_tasklet(struct mtl_main_impl* impl, struct mur_client* c) {
   ops.name = name;
   ops.handler = urc_tasklet_handler;
 
-  c->lcore_tasklet = mt_sch_register_tasklet(impl->main_sch, &ops);
+  c->lcore_tasklet = mtl_sch_register_tasklet(impl->main_sch, &ops);
   if (!c->lcore_tasklet) {
     err("%s, register lcore tasklet fail\n", __func__);
     MUDP_ERR_RET(EIO);
@@ -447,7 +448,7 @@ int mur_client_put(struct mur_client* c) {
   urc_lcore_wakeup(c); /* wake up any pending wait */
 
   if (c->lcore_tasklet) {
-    mt_sch_unregister_tasklet(c->lcore_tasklet);
+    mtl_sch_unregister_tasklet(c->lcore_tasklet);
     c->lcore_tasklet = NULL;
   }
   if (c->q) {
@@ -519,7 +520,7 @@ int mur_client_timedwait(struct mur_client* c, unsigned int timedwait_us,
   struct timespec time;
   clock_gettime(MT_THREAD_TIMEDWAIT_CLOCK_ID, &time);
   uint64_t ns = mt_timespec_to_ns(&time);
-  ns += timedwait_us * NS_PER_US;
+  ns += (uint64_t)timedwait_us * NS_PER_US;
   mt_ns_to_timespec(ns, &time);
   ret = mt_pthread_cond_timedwait(&c->lcore_wake_cond, &c->lcore_wake_mutex, &time);
   dbg("%s(%u), timedwait ret %d\n", __func__, q->dst_port, ret);

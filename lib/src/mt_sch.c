@@ -4,11 +4,16 @@
 
 #include "mt_sch.h"
 
-#include "mt_dev.h"
+#include <signal.h>
+
+#include "mt_instance.h"
 #include "mt_log.h"
 #include "mt_stat.h"
+#include "mtl_lcore_shm_api.h"
+#include "st2110/st_rx_ancillary_session.h"
 #include "st2110/st_rx_audio_session.h"
 #include "st2110/st_rx_video_session.h"
+#include "st2110/st_tx_ancillary_session.h"
 #include "st2110/st_tx_audio_session.h"
 #include "st2110/st_tx_video_session.h"
 
@@ -20,27 +25,27 @@ static inline void sch_mgr_unlock(struct mt_sch_mgr* mgr) {
   mt_pthread_mutex_unlock(&mgr->mgr_mutex);
 }
 
-static inline void sch_lock(struct mt_sch_impl* sch) {
+static inline void sch_lock(struct mtl_sch_impl* sch) {
   mt_pthread_mutex_lock(&sch->mutex);
 }
 
-static inline void sch_unlock(struct mt_sch_impl* sch) {
+static inline void sch_unlock(struct mtl_sch_impl* sch) {
   mt_pthread_mutex_unlock(&sch->mutex);
 }
 
-static void sch_sleep_wakeup(struct mt_sch_impl* sch) {
+static void sch_sleep_wakeup(struct mtl_sch_impl* sch) {
   mt_pthread_mutex_lock(&sch->sleep_wake_mutex);
   mt_pthread_cond_signal(&sch->sleep_wake_cond);
   mt_pthread_mutex_unlock(&sch->sleep_wake_mutex);
 }
 
 static void sch_sleep_alarm_handler(void* param) {
-  struct mt_sch_impl* sch = param;
+  struct mtl_sch_impl* sch = param;
 
   sch_sleep_wakeup(sch);
 }
 
-static int sch_tasklet_sleep(struct mtl_main_impl* impl, struct mt_sch_impl* sch) {
+static int sch_tasklet_sleep(struct mtl_main_impl* impl, struct mtl_sch_impl* sch) {
   /* get sleep us */
   uint64_t sleep_us = mt_sch_default_sleep_us(impl);
   uint64_t force_sleep_us = mt_sch_force_sleep_us(impl);
@@ -98,24 +103,22 @@ static int sch_tasklet_sleep(struct mtl_main_impl* impl, struct mt_sch_impl* sch
 }
 
 static int sch_tasklet_func(void* args) {
-  struct mt_sch_impl* sch = args;
+  struct mtl_sch_impl* sch = args;
   struct mtl_main_impl* impl = sch->parent;
   int idx = sch->idx;
   int num_tasklet, i;
-  struct mt_sch_tasklet_ops* ops;
+  struct mtl_tasklet_ops* ops;
   struct mt_sch_tasklet_impl* tasklet;
-  bool time_measure = mt_has_tasklet_time_measure(impl);
+  bool time_measure = mt_user_tasklet_time_measure(impl);
   uint64_t tsc_s = 0;
 
   num_tasklet = sch->max_tasklet_idx;
   info("%s(%d), start with %d tasklets\n", __func__, idx, num_tasklet);
 
-  for (i = 0; i < num_tasklet; i++) {
-    tasklet = sch->tasklet[i];
-    if (!tasklet) continue;
-    ops = &tasklet->ops;
-    if (ops->pre_start) ops->pre_start(ops->priv);
-  }
+  char thread_name[32];
+  snprintf(thread_name, sizeof(thread_name), "mtl_sch_%d", idx);
+
+  mtl_thread_setname(pthread_self(), thread_name);
 
   for (i = 0; i < num_tasklet; i++) {
     tasklet = sch->tasklet[i];
@@ -127,7 +130,7 @@ static int sch_tasklet_func(void* args) {
   sch->sleep_ratio_start_ns = mt_get_tsc(impl);
 
   while (rte_atomic32_read(&sch->request_stop) == 0) {
-    int pending = MT_TASKLET_ALL_DONE;
+    int pending = MTL_TASKLET_ALL_DONE;
 
     num_tasklet = sch->max_tasklet_idx;
     for (i = 0; i < num_tasklet; i++) {
@@ -143,14 +146,14 @@ static int sch_tasklet_func(void* args) {
       if (time_measure) tsc_s = mt_get_tsc(impl);
       pending += ops->handler(ops->priv);
       if (time_measure) {
-        uint32_t delta_us = (mt_get_tsc(impl) - tsc_s) / 1000;
+        uint32_t delta_us = (mt_get_tsc(impl) - tsc_s) / NS_PER_US;
         tasklet->stat_max_time_us = RTE_MAX(tasklet->stat_max_time_us, delta_us);
         tasklet->stat_min_time_us = RTE_MIN(tasklet->stat_min_time_us, delta_us);
         tasklet->stat_sum_time_us += delta_us;
         tasklet->stat_time_cnt++;
       }
     }
-    if (sch->allow_sleep && (pending == MT_TASKLET_ALL_DONE)) {
+    if (sch->allow_sleep && (pending == MTL_TASKLET_ALL_DONE)) {
       sch_tasklet_sleep(impl, sch);
     }
   }
@@ -173,7 +176,7 @@ static void* sch_tasklet_thread(void* arg) {
   return NULL;
 }
 
-static int sch_start(struct mt_sch_impl* sch) {
+static int sch_start(struct mtl_sch_impl* sch) {
   int idx = sch->idx;
   int ret;
 
@@ -190,7 +193,9 @@ static int sch_start(struct mt_sch_impl* sch) {
   rte_atomic32_set(&sch->stopped, 0);
 
   if (!sch->run_in_thread) {
-    ret = mt_dev_get_lcore(sch->parent, &sch->lcore);
+    ret = mt_sch_get_lcore(
+        sch->parent, &sch->lcore,
+        (sch->type == MT_SCH_TYPE_APP) ? MT_LCORE_TYPE_SCH_USER : MT_LCORE_TYPE_SCH);
     if (ret < 0) {
       err("%s(%d), get lcore fail %d\n", __func__, idx, ret);
       sch_unlock(sch);
@@ -215,7 +220,7 @@ static int sch_start(struct mt_sch_impl* sch) {
   return 0;
 }
 
-static int sch_stop(struct mt_sch_impl* sch) {
+static int sch_stop(struct mtl_sch_impl* sch) {
   int idx = sch->idx;
 
   sch_lock(sch);
@@ -232,7 +237,7 @@ static int sch_stop(struct mt_sch_impl* sch) {
   }
   if (!sch->run_in_thread) {
     rte_eal_wait_lcore(sch->lcore);
-    mt_dev_put_lcore(sch->parent, sch->lcore);
+    mt_sch_put_lcore(sch->parent, sch->lcore);
   } else {
     pthread_join(sch->tid, NULL);
   }
@@ -245,9 +250,9 @@ static int sch_stop(struct mt_sch_impl* sch) {
   return 0;
 }
 
-static struct mt_sch_impl* sch_request(struct mtl_main_impl* impl, enum mt_sch_type type,
-                                       mt_sch_mask_t mask) {
-  struct mt_sch_impl* sch;
+static struct mtl_sch_impl* sch_request(struct mtl_main_impl* impl, enum mt_sch_type type,
+                                        mt_sch_mask_t mask, struct mtl_sch_ops* ops) {
+  struct mtl_sch_impl* sch;
 
   for (int sch_idx = 0; sch_idx < MT_MAX_SCH_NUM; sch_idx++) {
     /* mask check */
@@ -258,9 +263,27 @@ static struct mt_sch_impl* sch_request(struct mtl_main_impl* impl, enum mt_sch_t
     sch_lock(sch);
     if (!mt_sch_is_active(sch)) { /* find one free sch */
       sch->type = type;
+      if (ops && ops->name) {
+        snprintf(sch->name, sizeof(sch->name), "%s", ops->name);
+      } else {
+        snprintf(sch->name, sizeof(sch->name), "sch_%d", sch_idx);
+      }
+      if (ops && ops->nb_tasklets)
+        sch->nb_tasklets = ops->nb_tasklets;
+      else
+        sch->nb_tasklets = impl->tasklets_nb_per_sch;
+      sch->tasklet = mt_rte_zmalloc_socket(sizeof(*sch->tasklet) * sch->nb_tasklets,
+                                           mt_socket_id(impl, MTL_PORT_P));
+      if (!sch->tasklet) {
+        err("%s(%d), %u tasklet malloc fail\n", __func__, sch_idx, sch->nb_tasklets);
+        sch_unlock(sch);
+        return NULL;
+      }
       rte_atomic32_inc(&sch->active);
       rte_atomic32_inc(&mt_sch_get_mgr(impl)->sch_cnt);
       sch_unlock(sch);
+      info("%s(%d), name %s with %u tasklets\n", __func__, sch_idx, sch->name,
+           sch->nb_tasklets);
       return sch;
     }
     sch_unlock(sch);
@@ -270,7 +293,7 @@ static struct mt_sch_impl* sch_request(struct mtl_main_impl* impl, enum mt_sch_t
   return NULL;
 }
 
-static int sch_free(struct mt_sch_impl* sch) {
+static int sch_free(struct mtl_sch_impl* sch) {
   int idx = sch->idx;
 
   if (!mt_sch_is_active(sch)) {
@@ -278,20 +301,28 @@ static int sch_free(struct mt_sch_impl* sch) {
     return -EIO;
   }
 
+  info("%s(%d), start to free sch: %s \n", __func__, idx, sch->name);
   sch_lock(sch);
-  for (int i = 0; i < sch->nb_tasklets; i++) {
-    if (sch->tasklet[i]) {
-      warn("%s(%d), tasklet %d still active\n", __func__, idx, i);
-      mt_sch_unregister_tasklet(sch->tasklet[i]);
+  if (sch->tasklet) {
+    for (int i = 0; i < sch->nb_tasklets; i++) {
+      if (sch->tasklet[i]) {
+        warn("%s(%d), tasklet %d still active\n", __func__, idx, i);
+        sch_unlock(sch); /* unlock */
+        mtl_sch_unregister_tasklet(sch->tasklet[i]);
+        sch_lock(sch);
+      }
     }
+    mt_rte_free(sch->tasklet);
+    sch->tasklet = NULL;
   }
+  sch->nb_tasklets = 0;
   rte_atomic32_dec(&mt_sch_get_mgr(sch->parent)->sch_cnt);
   rte_atomic32_dec(&sch->active);
   sch_unlock(sch);
   return 0;
 }
 
-static int sch_free_quota(struct mt_sch_impl* sch, int quota_mbs) {
+static int sch_free_quota(struct mtl_sch_impl* sch, int quota_mbs) {
   int idx = sch->idx;
 
   if (!mt_sch_is_active(sch)) {
@@ -311,7 +342,7 @@ static int sch_free_quota(struct mt_sch_impl* sch, int quota_mbs) {
   return 0;
 }
 
-static bool sch_is_capable(struct mt_sch_impl* sch, int quota_mbs,
+static bool sch_is_capable(struct mtl_sch_impl* sch, int quota_mbs,
                            enum mt_sch_type type) {
   if (!quota_mbs) { /* zero quota_mbs can be applied to any type */
     return true;
@@ -340,21 +371,27 @@ static void sch_tasklet_stat_clear(struct mt_sch_tasklet_impl* tasklet) {
 }
 
 static int sch_stat(void* priv) {
-  struct mt_sch_impl* sch = priv;
+  struct mtl_sch_impl* sch = priv;
   int num_tasklet = sch->max_tasklet_idx;
   struct mt_sch_tasklet_impl* tasklet;
   int idx = sch->idx;
   uint32_t avg_us;
 
-  if (mt_has_tasklet_time_measure(sch->parent)) {
+  if (!mt_sch_is_active(sch)) return 0;
+
+  notice("SCH(%d:%s): tasklets %d max idx %d, lcore %u\n", idx, sch->name, num_tasklet,
+         sch->max_tasklet_idx, sch->lcore);
+  if (mt_user_tasklet_time_measure(sch->parent)) {
     for (int i = 0; i < num_tasklet; i++) {
       tasklet = sch->tasklet[i];
       if (!tasklet) continue;
 
+      dbg("SCH(%d): tasklet %s at %d\n", idx, tasklet->name, i);
       if (tasklet->stat_time_cnt) {
         avg_us = tasklet->stat_sum_time_us / tasklet->stat_time_cnt;
-        notice("SCH(%d): tasklet %s, avg %uus max %uus min %uus\n", idx, tasklet->name,
-               avg_us, tasklet->stat_max_time_us, tasklet->stat_min_time_us);
+        notice("SCH(%d,%d): tasklet %s, avg %uus max %uus min %uus\n", idx, i,
+               tasklet->name, avg_us, tasklet->stat_max_time_us,
+               tasklet->stat_min_time_us);
         sch_tasklet_stat_clear(tasklet);
       }
     }
@@ -371,15 +408,316 @@ static int sch_stat(void* priv) {
     sch->stat_sleep_ns_min = -1;
     sch->stat_sleep_ns_max = 0;
   }
-  if (mt_sch_is_active(sch) && !mt_sch_started(sch)) {
+  if (!mt_sch_started(sch)) {
     notice("SCH(%d): active but still not started\n", idx);
   }
 
   return 0;
 }
 
-int mt_sch_unregister_tasklet(struct mt_sch_tasklet_impl* tasklet) {
-  struct mt_sch_impl* sch = tasklet->sch;
+static int sch_filelock_lock(struct mt_sch_mgr* mgr) {
+  int fd = open(MT_FLOCK_PATH, O_RDONLY | O_CREAT, 0666);
+  if (fd < 0) {
+    /* sometimes may fail due to user permission, try open read-only */
+    fd = open(MT_FLOCK_PATH, O_RDONLY);
+    if (fd < 0) {
+      err("%s, failed to open %s, %s\n", __func__, MT_FLOCK_PATH, strerror(errno));
+      return -EIO;
+    }
+  }
+  mgr->lcore_lock_fd = fd;
+  /* wait until locked */
+  if (flock(fd, LOCK_EX) != 0) {
+    err("%s, can not lock file\n", __func__);
+    close(fd);
+    mgr->lcore_lock_fd = -1;
+    return -EIO;
+  }
+
+  return 0;
+}
+
+static int sch_filelock_unlock(struct mt_sch_mgr* mgr) {
+  int fd = mgr->lcore_lock_fd;
+
+  if (fd < 0) {
+    err("%s, wrong lock file fd %d\n", __func__, fd);
+    return -EIO;
+  }
+
+  if (flock(fd, LOCK_UN) != 0) {
+    err("%s, can not unlock file\n", __func__);
+    return -EIO;
+  }
+  close(fd);
+  mgr->lcore_lock_fd = -1;
+  return 0;
+}
+
+static int sch_lcore_shm_init(struct mt_lcore_mgr* mgr, bool clear_on_first) {
+  struct mt_lcore_shm* lcore_shm = NULL;
+  int ret;
+
+  mgr->lcore_shm_id = -1;
+
+  key_t key = ftok("/dev/null", 21);
+  if (key < 0) {
+    err("%s, ftok error: %s\n", __func__, strerror(errno));
+    return -EIO;
+  }
+  int shm_id = shmget(key, sizeof(*lcore_shm), 0666 | IPC_CREAT);
+  if (shm_id < 0) {
+    err("%s, can not get shared memory for lcore, %s\n", __func__, strerror(errno));
+    return -EIO;
+  }
+  mgr->lcore_shm_id = shm_id;
+
+  lcore_shm = shmat(shm_id, NULL, 0);
+  if (lcore_shm == (void*)-1) {
+    err("%s, can not attach shared memory for lcore, %s\n", __func__, strerror(errno));
+    return -EIO;
+  }
+
+  struct shmid_ds stat;
+  ret = shmctl(shm_id, IPC_STAT, &stat);
+  if (ret < 0) {
+    err("%s, shmctl fail\n", __func__);
+    shmdt(lcore_shm);
+    return ret;
+  }
+
+  if (clear_on_first && (stat.shm_nattch == 1)) {
+    info("%s, clear shm as we are the first user\n", __func__);
+    memset(lcore_shm, 0, sizeof(*lcore_shm));
+  }
+
+  mgr->lcore_shm = lcore_shm;
+  info("%s, shared memory attached at %p nattch %d shm_id %d key 0x%x\n", __func__,
+       mgr->lcore_shm, (int)stat.shm_nattch, shm_id, (int)key);
+  return 0;
+}
+
+static int sch_lcore_shm_uinit(struct mt_lcore_mgr* mgr) {
+  int ret;
+
+  if (mgr->lcore_shm) {
+    ret = shmdt(mgr->lcore_shm);
+    if (ret < 0) err("%s, shared memory detach failed, %s\n", __func__, strerror(errno));
+    mgr->lcore_shm = NULL;
+  }
+
+  if (mgr->lcore_shm_id >= 0) {
+    struct shmid_ds shmds;
+    ret = shmctl(mgr->lcore_shm_id, IPC_STAT, &shmds);
+    if (ret < 0) {
+      err("%s, can not stat shared memory, %s\n", __func__, strerror(errno));
+    } else {
+      if (shmds.shm_nattch == 0) { /* remove ipc if we are the last user */
+        notice("%s, remove shared memory as we are the last user\n", __func__);
+        ret = shmctl(mgr->lcore_shm_id, IPC_RMID, NULL);
+        if (ret < 0) {
+          warn("%s, can not remove shared memory, %s\n", __func__, strerror(errno));
+        }
+      }
+    }
+    mgr->lcore_shm_id = -1;
+  }
+
+  return 0;
+}
+
+static int sch_uinit_lcores(struct mtl_main_impl* impl, struct mt_sch_mgr* mgr) {
+  int ret;
+
+  for (unsigned int lcore = 0; lcore < RTE_MAX_LCORE; lcore++) {
+    if (mgr->local_lcores_active[lcore]) {
+      warn("%s, lcore %d still active\n", __func__, lcore);
+      mt_sch_put_lcore(impl, lcore);
+    }
+  }
+
+  ret = sch_filelock_lock(mgr);
+  if (ret < 0) {
+    err("%s, sch_filelock_lock fail\n", __func__);
+    return ret;
+  }
+
+  ret = sch_lcore_shm_uinit(&mgr->lcore_mgr);
+  if (ret < 0) {
+    err("%s, lcore shm uinit fail %d\n", __func__, ret);
+  }
+
+  ret = sch_filelock_unlock(mgr);
+  if (ret < 0) {
+    err("%s, sch_filelock_unlock fail\n", __func__);
+    return ret;
+  }
+
+  return 0;
+}
+
+static int sch_init_lcores(struct mt_sch_mgr* mgr) {
+  int ret;
+
+  if (mgr->lcore_mgr.lcore_shm) {
+    err("%s, lcore_shm attached\n", __func__);
+    return -EIO;
+  }
+
+  ret = sch_filelock_lock(mgr);
+  if (ret < 0) {
+    err("%s, sch_filelock_lock fail %d\n", __func__, ret);
+    return ret;
+  }
+
+  ret = sch_lcore_shm_init(&mgr->lcore_mgr, true);
+  if (ret < 0) {
+    err("%s, lcore init fail %d\n", __func__, ret);
+    sch_filelock_unlock(mgr);
+    return ret;
+  }
+
+  ret = sch_filelock_unlock(mgr);
+  if (ret < 0) {
+    err("%s, sch_filelock_unlock fail %d\n", __func__, ret);
+    return ret;
+  }
+  return 0;
+}
+
+int mt_sch_get_lcore(struct mtl_main_impl* impl, unsigned int* lcore,
+                     enum mt_lcore_type type) {
+  unsigned int cur_lcore = 0;
+  int ret;
+  if (mt_is_manager_connected(impl)) {
+    do {
+      cur_lcore = rte_get_next_lcore(cur_lcore, 1, 0);
+      if ((cur_lcore < RTE_MAX_LCORE) &&
+          mt_socket_match(rte_lcore_to_socket_id(cur_lcore),
+                          mt_socket_id(impl, MTL_PORT_P))) {
+        ret = mt_instance_get_lcore(impl, cur_lcore);
+        if (ret == 0) {
+          *lcore = cur_lcore;
+          return 0;
+        }
+      }
+    } while (cur_lcore < RTE_MAX_LCORE);
+  } else {
+    struct mt_sch_mgr* mgr = mt_sch_get_mgr(impl);
+    struct mt_user_info* info = &impl->u_info;
+
+    struct mt_lcore_shm* lcore_shm = mgr->lcore_mgr.lcore_shm;
+    struct mt_lcore_shm_entry* shm_entry;
+
+    ret = sch_filelock_lock(mgr);
+    if (ret < 0) {
+      err("%s, sch_filelock_lock fail\n", __func__);
+      return ret;
+    }
+
+    do {
+      cur_lcore = rte_get_next_lcore(cur_lcore, 1, 0);
+      shm_entry = &lcore_shm->lcores_info[cur_lcore];
+
+      if ((cur_lcore < RTE_MAX_LCORE) &&
+          mt_socket_match(rte_lcore_to_socket_id(cur_lcore),
+                          mt_socket_id(impl, MTL_PORT_P))) {
+        if (!shm_entry->active) {
+          *lcore = cur_lcore;
+          shm_entry->active = true;
+          struct mt_user_info* u_info = &shm_entry->u_info;
+          strncpy(u_info->hostname, info->hostname, sizeof(u_info->hostname));
+          strncpy(u_info->user, info->user, sizeof(u_info->user));
+          strncpy(u_info->comm, info->comm, sizeof(u_info->comm));
+          shm_entry->type = type;
+          shm_entry->pid = info->pid;
+          lcore_shm->used++;
+          rte_atomic32_inc(&impl->lcore_cnt);
+          mgr->local_lcores_active[cur_lcore] = true;
+          ret = sch_filelock_unlock(mgr);
+          info("%s, available lcore %d\n", __func__, cur_lcore);
+          if (ret < 0) {
+            err("%s, sch_filelock_unlock fail\n", __func__);
+            return ret;
+          }
+          return 0;
+        }
+      }
+    } while (cur_lcore < RTE_MAX_LCORE);
+
+    sch_filelock_unlock(mgr);
+  }
+
+  err("%s, fail to find lcore\n", __func__);
+  return -EIO;
+}
+
+int mt_sch_put_lcore(struct mtl_main_impl* impl, unsigned int lcore) {
+  if (mt_is_manager_connected(impl)) {
+    return mt_instance_put_lcore(impl, lcore);
+  } else {
+    int ret;
+    struct mt_sch_mgr* mgr = mt_sch_get_mgr(impl);
+    struct mt_lcore_shm* lcore_shm = mgr->lcore_mgr.lcore_shm;
+
+    if (lcore >= RTE_MAX_LCORE) {
+      err("%s, invalid lcore %d\n", __func__, lcore);
+      return -EIO;
+    }
+    if (!lcore_shm) {
+      err("%s, no lcore shm attached\n", __func__);
+      return -EIO;
+    }
+    ret = sch_filelock_lock(mgr);
+    if (ret < 0) {
+      err("%s, sch_filelock_lock fail\n", __func__);
+      return ret;
+    }
+    if (!lcore_shm->lcores_info[lcore].active) {
+      err("%s, lcore %d not active\n", __func__, lcore);
+      ret = -EIO;
+      goto err_unlock;
+    }
+
+    lcore_shm->lcores_info[lcore].active = false;
+    lcore_shm->used--;
+    rte_atomic32_dec(&impl->lcore_cnt);
+    mgr->local_lcores_active[lcore] = false;
+    ret = sch_filelock_unlock(mgr);
+    info("%s, lcore %d\n", __func__, lcore);
+    if (ret < 0) {
+      err("%s, sch_filelock_unlock fail\n", __func__);
+      return ret;
+    }
+    return 0;
+
+  err_unlock:
+    sch_filelock_unlock(mgr);
+    return ret;
+  }
+}
+
+bool mt_sch_lcore_valid(struct mtl_main_impl* impl, unsigned int lcore) {
+  struct mt_sch_mgr* mgr = mt_sch_get_mgr(impl);
+  struct mt_lcore_shm* lcore_shm = mgr->lcore_mgr.lcore_shm;
+
+  if (lcore >= RTE_MAX_LCORE) {
+    err("%s, invalid lcore %d\n", __func__, lcore);
+    return -EIO;
+  }
+
+  if (mt_is_manager_connected(impl)) return true;
+
+  if (!lcore_shm) {
+    err("%s, no lcore shm attached\n", __func__);
+    return -EIO;
+  }
+
+  return lcore_shm->lcores_info[lcore].active;
+}
+
+int mtl_sch_unregister_tasklet(mtl_tasklet_handle tasklet) {
+  struct mtl_sch_impl* sch = tasklet->sch;
   int sch_idx = sch->idx;
   int idx = tasklet->idx;
 
@@ -410,6 +748,8 @@ int mt_sch_unregister_tasklet(struct mt_sch_tasklet_impl* tasklet) {
     } while (!tasklet->ack_exit);
     info("%s(%d), tasklet %s(%d) unregistered, retry %d\n", __func__, sch_idx,
          tasklet->name, idx, retry);
+    /* call the stop for runtime path */
+    if (tasklet->ops.stop) tasklet->ops.stop(tasklet->ops.priv);
   } else {
     /* safe to directly remove */
     sch->tasklet[idx] = NULL;
@@ -428,8 +768,8 @@ int mt_sch_unregister_tasklet(struct mt_sch_tasklet_impl* tasklet) {
   return 0;
 }
 
-struct mt_sch_tasklet_impl* mt_sch_register_tasklet(
-    struct mt_sch_impl* sch, struct mt_sch_tasklet_ops* tasklet_ops) {
+mtl_tasklet_handle mtl_sch_register_tasklet(struct mtl_sch_impl* sch,
+                                            struct mtl_tasklet_ops* tasklet_ops) {
   int idx = sch->idx;
   struct mtl_main_impl* impl = sch->parent;
   struct mt_sch_tasklet_impl* tasklet;
@@ -449,7 +789,7 @@ struct mt_sch_tasklet_impl* mt_sch_register_tasklet(
     }
 
     tasklet->ops = *tasklet_ops;
-    strncpy(tasklet->name, tasklet_ops->name, ST_MAX_NAME_LEN - 1);
+    snprintf(tasklet->name, ST_MAX_NAME_LEN - 1, "%s", tasklet_ops->name);
     tasklet->sch = sch;
     tasklet->idx = i;
     sch_tasklet_stat_clear(tasklet);
@@ -458,7 +798,6 @@ struct mt_sch_tasklet_impl* mt_sch_register_tasklet(
     sch->max_tasklet_idx = RTE_MAX(sch->max_tasklet_idx, i + 1);
 
     if (mt_sch_started(sch)) {
-      if (tasklet_ops->pre_start) tasklet_ops->pre_start(tasklet_ops->priv);
       if (tasklet_ops->start) tasklet_ops->start(tasklet_ops->priv);
     }
 
@@ -474,12 +813,17 @@ struct mt_sch_tasklet_impl* mt_sch_register_tasklet(
 }
 
 int mt_sch_mrg_init(struct mtl_main_impl* impl, int data_quota_mbs_limit) {
-  struct mt_sch_impl* sch;
+  struct mtl_sch_impl* sch;
   struct mt_sch_mgr* mgr = mt_sch_get_mgr(impl);
-  int socket = mt_socket_id(impl, MTL_PORT_P);
-  int nb_tasklets = impl->tasklets_nb_per_sch;
+  int ret;
 
   mt_pthread_mutex_init(&mgr->mgr_mutex, NULL);
+
+  if (!mt_is_manager_connected(impl)) {
+    mgr->lcore_lock_fd = -1;
+    ret = sch_init_lcores(mgr);
+    if (ret < 0) return ret;
+  }
 
   for (int sch_idx = 0; sch_idx < MT_MAX_SCH_NUM; sch_idx++) {
     sch = mt_sch_instance(impl, sch_idx);
@@ -490,13 +834,12 @@ int mt_sch_mrg_init(struct mtl_main_impl* impl, int data_quota_mbs_limit) {
     rte_atomic32_set(&sch->ref_cnt, 0);
     rte_atomic32_set(&sch->active, 0);
     sch->max_tasklet_idx = 0;
-    sch->nb_tasklets = nb_tasklets;
     sch->data_quota_mbs_total = 0;
     sch->data_quota_mbs_limit = data_quota_mbs_limit;
-    sch->run_in_thread = mt_tasklet_has_thread(impl);
+    sch->run_in_thread = mt_user_tasklet_thread(impl);
 
     /* sleep info init */
-    sch->allow_sleep = mt_tasklet_has_sleep(impl);
+    sch->allow_sleep = mt_user_tasklet_sleep(impl);
 #if MT_THREAD_TIMEDWAIT_CLOCK_ID != CLOCK_REALTIME
     pthread_condattr_t attr;
     pthread_condattr_init(&attr);
@@ -514,33 +857,29 @@ int mt_sch_mrg_init(struct mtl_main_impl* impl, int data_quota_mbs_limit) {
     /* init mgr lock for audio */
     mt_pthread_mutex_init(&sch->tx_a_mgr_mutex, NULL);
     mt_pthread_mutex_init(&sch->rx_a_mgr_mutex, NULL);
+    /* init mgr lock for anc */
+    mt_pthread_mutex_init(&sch->tx_anc_mgr_mutex, NULL);
+    mt_pthread_mutex_init(&sch->rx_anc_mgr_mutex, NULL);
 
     mt_stat_register(impl, sch_stat, sch, "sch");
-
-    sch->tasklet =
-        mt_rte_zmalloc_socket(sizeof(*sch->tasklet) * sch->nb_tasklets, socket);
-    if (!sch->tasklet) {
-      err("%s(%d), tasklet malloc fail\n", __func__, sch_idx);
-      mt_sch_mrg_uinit(impl);
-      return -ENOMEM;
-    }
   }
 
-  info("%s, succ with data quota %d M, nb_tasklets %d\n", __func__, data_quota_mbs_limit,
-       nb_tasklets);
+  info("%s, succ with data quota %d M\n", __func__, data_quota_mbs_limit);
   return 0;
 }
 
 int mt_sch_mrg_uinit(struct mtl_main_impl* impl) {
-  struct mt_sch_impl* sch;
+  struct mtl_sch_impl* sch;
   struct mt_sch_mgr* mgr = mt_sch_get_mgr(impl);
+
+  if (!mt_is_manager_connected(impl)) sch_uinit_lcores(impl, mgr);
 
   for (int sch_idx = 0; sch_idx < MT_MAX_SCH_NUM; sch_idx++) {
     sch = mt_sch_instance(impl, sch_idx);
 
-    if (sch->tasklet) {
-      mt_rte_free(sch->tasklet);
-      sch->tasklet = NULL;
+    if (mt_sch_is_active(sch)) {
+      warn("%s(%d), sch:%s still active\n", __func__, sch_idx, sch->name);
+      mtl_sch_free(sch);
     }
 
     mt_stat_unregister(impl, sch_stat, sch);
@@ -550,6 +889,9 @@ int mt_sch_mrg_uinit(struct mtl_main_impl* impl) {
 
     mt_pthread_mutex_destroy(&sch->tx_a_mgr_mutex);
     mt_pthread_mutex_destroy(&sch->rx_a_mgr_mutex);
+
+    mt_pthread_mutex_destroy(&sch->tx_anc_mgr_mutex);
+    mt_pthread_mutex_destroy(&sch->rx_anc_mgr_mutex);
 
     mt_pthread_mutex_destroy(&sch->sleep_wake_mutex);
     mt_pthread_cond_destroy(&sch->sleep_wake_cond);
@@ -561,7 +903,7 @@ int mt_sch_mrg_uinit(struct mtl_main_impl* impl) {
   return 0;
 };
 
-int mt_sch_add_quota(struct mt_sch_impl* sch, int quota_mbs) {
+int mt_sch_add_quota(struct mtl_sch_impl* sch, int quota_mbs) {
   int idx = sch->idx;
 
   if (!mt_sch_is_active(sch)) {
@@ -585,7 +927,7 @@ int mt_sch_add_quota(struct mt_sch_impl* sch, int quota_mbs) {
   return -ENOMEM;
 }
 
-int mt_sch_put(struct mt_sch_impl* sch, int quota_mbs) {
+int mt_sch_put(struct mtl_sch_impl* sch, int quota_mbs) {
   int sidx = sch->idx, ret;
   struct mtl_main_impl* impl = sch->parent;
 
@@ -611,12 +953,20 @@ int mt_sch_put(struct mt_sch_impl* sch, int quota_mbs) {
     mt_pthread_mutex_unlock(&sch->rx_video_mgr_mutex);
 
     mt_pthread_mutex_lock(&sch->tx_a_mgr_mutex);
-    st_tx_audio_sessions_sch_uinit(impl, sch);
+    st_tx_audio_sessions_sch_uinit(sch);
     mt_pthread_mutex_unlock(&sch->tx_a_mgr_mutex);
 
     mt_pthread_mutex_lock(&sch->rx_a_mgr_mutex);
-    st_rx_audio_sessions_sch_uinit(impl, sch);
+    st_rx_audio_sessions_sch_uinit(sch);
     mt_pthread_mutex_unlock(&sch->rx_a_mgr_mutex);
+
+    mt_pthread_mutex_lock(&sch->tx_anc_mgr_mutex);
+    st_tx_ancillary_sessions_sch_uinit(sch);
+    mt_pthread_mutex_unlock(&sch->tx_anc_mgr_mutex);
+
+    mt_pthread_mutex_lock(&sch->rx_anc_mgr_mutex);
+    st_rx_ancillary_sessions_sch_uinit(sch);
+    mt_pthread_mutex_unlock(&sch->rx_anc_mgr_mutex);
 
     sch_free(sch);
   }
@@ -624,10 +974,10 @@ int mt_sch_put(struct mt_sch_impl* sch, int quota_mbs) {
   return 0;
 }
 
-struct mt_sch_impl* mt_sch_get(struct mtl_main_impl* impl, int quota_mbs,
-                               enum mt_sch_type type, mt_sch_mask_t mask) {
+struct mtl_sch_impl* mt_sch_get(struct mtl_main_impl* impl, int quota_mbs,
+                                enum mt_sch_type type, mt_sch_mask_t mask) {
   int ret, idx;
-  struct mt_sch_impl* sch;
+  struct mtl_sch_impl* sch;
   struct mt_sch_mgr* mgr = mt_sch_get_mgr(impl);
 
   sch_mgr_lock(mgr);
@@ -651,7 +1001,7 @@ struct mt_sch_impl* mt_sch_get(struct mtl_main_impl* impl, int quota_mbs,
   }
 
   /* no quota, try to create one */
-  sch = sch_request(impl, type, mask);
+  sch = sch_request(impl, type, mask, NULL);
   if (!sch) {
     err("%s, no free sch\n", __func__);
     sch_mgr_unlock(mgr);
@@ -684,11 +1034,14 @@ struct mt_sch_impl* mt_sch_get(struct mtl_main_impl* impl, int quota_mbs,
 
 int mt_sch_start_all(struct mtl_main_impl* impl) {
   int ret = 0;
-  struct mt_sch_impl* sch;
+  struct mtl_sch_impl* sch;
 
   /* start active sch */
   for (int sch_idx = 0; sch_idx < MT_MAX_SCH_NUM; sch_idx++) {
     sch = mt_sch_instance(impl, sch_idx);
+    /* not start the app created sch, app should do the mtl_sch_start */
+    if (sch->type == MT_SCH_TYPE_APP) continue;
+
     if (mt_sch_is_active(sch) && !mt_sch_started(sch)) {
       ret = sch_start(sch);
       if (ret < 0) {
@@ -704,11 +1057,14 @@ int mt_sch_start_all(struct mtl_main_impl* impl) {
 
 int mt_sch_stop_all(struct mtl_main_impl* impl) {
   int ret;
-  struct mt_sch_impl* sch;
+  struct mtl_sch_impl* sch;
 
   /* stop active sch */
   for (int sch_idx = 0; sch_idx < MT_MAX_SCH_NUM; sch_idx++) {
     sch = mt_sch_instance(impl, sch_idx);
+    /* not stop the app created sch, app should do the mtl_sch_stop */
+    if (sch->type == MT_SCH_TYPE_APP) continue;
+
     if (mt_sch_is_active(sch) && mt_sch_started(sch)) {
       ret = sch_stop(sch);
       if (ret < 0) {
@@ -718,5 +1074,222 @@ int mt_sch_stop_all(struct mtl_main_impl* impl) {
   }
 
   info("%s, succ\n", __func__);
+  return 0;
+}
+
+static const char* lcore_type_names[MT_LCORE_TYPE_MAX] = {
+    "lib_sch", "lib_tap", "lib_rxv_ring", "app_allocated", "lib_app_sch",
+};
+
+static const char* lcore_type_name(enum mt_lcore_type type) {
+  if (type >= MT_LCORE_TYPE_SCH && type < MT_LCORE_TYPE_MAX)
+    return lcore_type_names[type];
+  else
+    return "unknown";
+}
+
+int mtl_lcore_shm_print(void) {
+  struct mt_lcore_mgr lcore_mgr;
+  struct mt_lcore_shm_entry* shm_entry;
+
+  int ret = sch_lcore_shm_init(&lcore_mgr, false);
+  if (ret < 0) return ret;
+
+  struct mt_lcore_shm* lcore_shm = lcore_mgr.lcore_shm;
+  info("%s, MTL used lcores %d\n", __func__, lcore_shm->used);
+
+  int cpu_ids[RTE_MAX_LCORE];
+  int found = 0;
+
+  for (int i = 0; i < RTE_MAX_LCORE; i++) {
+    shm_entry = &lcore_shm->lcores_info[i];
+
+    if (!shm_entry->active) continue;
+    struct mt_user_info* u_info = &shm_entry->u_info;
+    info("%s, lcore %d active by %s@%s, pid: %d(comm: %s) type: %s\n", __func__, i,
+         u_info->user, u_info->hostname, (int)shm_entry->pid, u_info->comm,
+         lcore_type_name(shm_entry->type));
+    cpu_ids[found] = i;
+    found++;
+  }
+
+  if (found > 0) { /* read the cpu usage */
+    struct mt_cpu_usage prev[found];
+    struct mt_cpu_usage cur[found];
+
+    info("%s, collecting cpu usage...\n", __func__);
+    ret = mt_read_cpu_usage(prev, cpu_ids, found);
+    if (ret != found) {
+      err("%s, read cpu prev usage fail, expect %d but only %d get\n", __func__, found,
+          ret);
+    } else {
+      mt_sleep_ms(1000 * 1);
+      ret = mt_read_cpu_usage(cur, cpu_ids, found);
+      if (ret != found) {
+        err("%s, read cpu curr usage fail, expect %d but only %d get\n", __func__, found,
+            ret);
+      } else {
+        /* print the result */
+        for (int i = 0; i < found; i++) {
+          double usage = mt_calculate_cpu_usage(&prev[i], &cur[i]);
+          info("%s, lcore %d cpu usage %.2f%%\n", __func__, cpu_ids[i], usage);
+        }
+      }
+    }
+  }
+
+  sch_lcore_shm_uinit(&lcore_mgr);
+  return 0;
+}
+
+#ifdef WINDOWSENV
+static int lcore_shm_clean_auto_pid(struct mt_lcore_mgr* lcore_mgr) {
+  MTL_MAY_UNUSED(lcore_mgr);
+  err("%s, not support on windows\n", __func__);
+  return -EINVAL;
+}
+#else
+
+static int lcore_shm_clean_auto_pid(struct mt_lcore_mgr* lcore_mgr) {
+  struct mt_user_info info;
+  int clean = 0;
+
+  memset(&info, 0, sizeof(info));
+  mt_user_info_init(&info);
+
+  struct mt_lcore_shm* lcore_shm = lcore_mgr->lcore_shm;
+  struct mt_lcore_shm_entry* shm_entry;
+  for (int i = 0; i < RTE_MAX_LCORE; i++) {
+    shm_entry = &lcore_shm->lcores_info[i];
+
+    if (!shm_entry->active) continue;
+    struct mt_user_info* u_info = &shm_entry->u_info;
+    if (0 != strncmp(u_info->hostname, info.hostname, sizeof(u_info->hostname))) continue;
+    if (0 != strncmp(u_info->user, info.user, sizeof(u_info->user))) continue;
+    /* now check if PID is active with zero signal */
+    int result = kill(shm_entry->pid, 0);
+    if (0 == result) continue;
+    clean++;
+    notice("%s, delete dead lcore %d from the shared mem, PID %d\n", __func__, i,
+           (int)shm_entry->pid);
+  }
+
+  return clean;
+}
+#endif
+
+static int lcore_shm_clean_id(struct mt_lcore_mgr* lcore_mgr, void* args,
+                              size_t args_sz) {
+  struct mtl_lcore_clean_pid_info* info = args;
+
+  if (!args) {
+    err("%s, NULL args\n", __func__);
+    return -EINVAL;
+  }
+  if (args_sz != sizeof(*info)) {
+    err("%s, error args_sz %" PRIu64 "\n", __func__, args_sz);
+    return -EINVAL;
+  }
+  uint32_t lcore = info->lcore;
+  if (lcore >= RTE_MAX_LCORE) {
+    err("%s, invalid lcore %u\n", __func__, lcore);
+    return -EINVAL;
+  }
+
+  struct mt_lcore_shm* lcore_shm = lcore_mgr->lcore_shm;
+  struct mt_lcore_shm_entry* shm_entry = &lcore_shm->lcores_info[lcore];
+  if (!shm_entry->active) {
+    err("%s, lcore %u is inactive\n", __func__, lcore);
+    return -EINVAL;
+  }
+
+  shm_entry->active = false;
+  notice("%s, delete lcore %u from the shared mem, PID %d\n", __func__, lcore,
+         (int)shm_entry->pid);
+  return 0;
+}
+
+int mtl_lcore_shm_clean(enum mtl_lcore_clean_action action, void* args, size_t args_sz) {
+  struct mt_lcore_mgr lcore_mgr;
+
+  int ret = sch_lcore_shm_init(&lcore_mgr, false);
+  if (ret < 0) return ret;
+
+  MTL_MAY_UNUSED(args);
+  MTL_MAY_UNUSED(args_sz);
+  switch (action) {
+    case MTL_LCORE_CLEAN_PID_AUTO_CHECK:
+      ret = lcore_shm_clean_auto_pid(&lcore_mgr);
+      break;
+    case MTL_LCORE_CLEAN_LCORE:
+      ret = lcore_shm_clean_id(&lcore_mgr, args, args_sz);
+      break;
+    default:
+      err("%s, unknown action %d\n", __func__, action);
+      ret = -EINVAL;
+      break;
+  }
+
+  sch_lcore_shm_uinit(&lcore_mgr);
+  return ret;
+}
+
+/* below for public interface for application */
+
+mtl_sch_handle mtl_sch_create(mtl_handle mt, struct mtl_sch_ops* ops) {
+  struct mtl_main_impl* impl = mt;
+
+  if (impl->type != MT_HANDLE_MAIN) {
+    err("%s, invalid type %d\n", __func__, impl->type);
+    return NULL;
+  }
+
+  if (!ops) {
+    err("%s, NULL ops\n", __func__);
+    return NULL;
+  }
+
+  struct mtl_sch_impl* sch = sch_request(impl, MT_SCH_TYPE_APP, MT_SCH_MASK_ALL, ops);
+  if (!sch) {
+    err("%s, sch request fail\n", __func__);
+    return NULL;
+  }
+
+  info("%s, succ on %d\n", __func__, sch->idx);
+  return sch;
+}
+
+int mtl_sch_free(mtl_sch_handle sch) {
+  int idx = sch->idx;
+  /* stop incase user not dp the mtl_sch_stop */
+  if (mt_sch_started(sch)) sch_stop(sch);
+  int ret = sch_free(sch);
+  if (ret < 0) {
+    err("%s(%d), sch free fail %d\n", __func__, idx, ret);
+    return ret;
+  }
+  info("%s(%d), succ\n", __func__, idx);
+  return 0;
+}
+
+int mtl_sch_start(mtl_sch_handle sch) {
+  int idx = sch->idx;
+  int ret = sch_start(sch);
+  if (ret < 0) {
+    err("%s(%d), sch start fail %d\n", __func__, idx, ret);
+    return ret;
+  }
+  info("%s(%d), succ\n", __func__, idx);
+  return 0;
+}
+
+int mtl_sch_stop(mtl_sch_handle sch) {
+  int idx = sch->idx;
+  int ret = sch_stop(sch);
+  if (ret < 0) {
+    err("%s(%d), sch start fail %d\n", __func__, idx, ret);
+    return ret;
+  }
+  info("%s(%d), succ\n", __func__, idx);
   return 0;
 }

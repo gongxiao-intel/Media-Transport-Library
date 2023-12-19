@@ -23,6 +23,9 @@ struct st20p_rx_frame {
   struct st_frame dst; /* converted */
   struct st20_convert_frame_meta convert_frame;
   uint16_t idx;
+  void* user_meta; /* the user meta data */
+  size_t user_meta_buffer_size;
+  size_t user_meta_data_size;
 };
 
 struct st20p_rx_ctx {
@@ -45,6 +48,7 @@ struct st20p_rx_ctx {
   struct st_frame_converter* internal_converter;
   bool ready;
   bool derive;
+  bool dynamic_ext_frame;
 
   size_t dst_size;
 

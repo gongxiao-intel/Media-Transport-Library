@@ -1117,6 +1117,97 @@ TEST(Cvt, rfc4175_422be10_to_422le8_avx512_vbmi_dma) {
   mtl_udma_free(dma);
 }
 
+static int test_cvt_extend_yuv422p8_to_rfc4175_422be10(
+    int w, int h, uint8_t* y, uint8_t* b, uint8_t* r,
+    struct st20_rfc4175_422_10_pg2_be* pg_10) {
+  uint32_t cnt = w * h / 2;
+
+  for (uint32_t i = 0; i < cnt; i++) {
+    uint8_t b0 = *b++;
+    uint8_t r0 = *r++;
+    uint8_t y0 = *y++;
+    uint8_t y1 = *y++;
+
+    pg_10[i].Cb00 = b0;
+    pg_10[i].Y00 = y0 >> 2;
+    pg_10[i].Cb00_ = 0;
+    pg_10[i].Y00_ = (y0 & 0x3) << 2;
+    pg_10[i].Cr00 = r0 >> 4;
+    pg_10[i].Y01 = y1 >> 6;
+    pg_10[i].Cr00_ = (r0 & 0xF) << 2;
+    pg_10[i].Y01_ = y1 << 2;
+  }
+
+  return 0;
+}
+
+static void test_cvt_rfc4175_422be10_to_yuv422p8(int w, int h,
+                                                 enum mtl_simd_level cvt_level) {
+  int ret;
+  size_t fb_pg2_size_10 = (size_t)w * h * 5 / 2;
+  size_t fb_yuv422p8_size = (size_t)w * h * 2;
+  struct st20_rfc4175_422_10_pg2_be* pg_10 =
+      (struct st20_rfc4175_422_10_pg2_be*)st_test_zmalloc(fb_pg2_size_10);
+  uint8_t* p8 = (uint8_t*)st_test_zmalloc(fb_yuv422p8_size);
+  uint8_t* p8_2 = (uint8_t*)st_test_zmalloc(fb_yuv422p8_size);
+
+  if (!pg_10 || !p8 || !p8_2) {
+    EXPECT_EQ(0, 1);
+    if (pg_10) st_test_free(pg_10);
+    if (p8) st_test_free(p8);
+    if (p8_2) st_test_free(p8_2);
+    return;
+  }
+
+  st_test_rand_data(p8, fb_yuv422p8_size, 0);
+  test_cvt_extend_yuv422p8_to_rfc4175_422be10(w, h, p8, p8 + w * h, p8 + w * h * 3 / 2,
+                                              pg_10);
+  ret = st20_rfc4175_422be10_to_yuv422p8_simd(pg_10, p8_2, p8_2 + w * h,
+                                              p8_2 + w * h * 3 / 2, w, h, cvt_level);
+  EXPECT_EQ(0, ret);
+
+  EXPECT_EQ(0, memcmp(p8, p8_2, fb_yuv422p8_size));
+
+  st_test_free(pg_10);
+  st_test_free(p8);
+  st_test_free(p8_2);
+}
+
+TEST(Cvt, rfc4175_422be10_to_yuv422p8) {
+  test_cvt_rfc4175_422be10_to_yuv422p8(1920, 1080, MTL_SIMD_LEVEL_MAX);
+}
+
+TEST(Cvt, rfc4175_422be10_to_yuv422p8_scalar) {
+  test_cvt_rfc4175_422be10_to_yuv422p8(1920, 1080, MTL_SIMD_LEVEL_NONE);
+}
+
+TEST(Cvt, rfc4175_422be10_to_yuv422p8_avx2) {
+  test_cvt_rfc4175_422be10_to_yuv422p8(1920, 1080, MTL_SIMD_LEVEL_AVX2);
+  test_cvt_rfc4175_422be10_to_yuv422p8(722, 111, MTL_SIMD_LEVEL_AVX2);
+  int w = 2; /* each pg has two pixels */
+  for (int h = 640; h < (640 + 64); h++) {
+    test_cvt_rfc4175_422be10_to_yuv422p8(w, h, MTL_SIMD_LEVEL_AVX2);
+  }
+}
+
+TEST(Cvt, rfc4175_422be10_to_yuv422p8_avx512) {
+  test_cvt_rfc4175_422be10_to_yuv422p8(1920, 1080, MTL_SIMD_LEVEL_AVX512);
+  test_cvt_rfc4175_422be10_to_yuv422p8(722, 111, MTL_SIMD_LEVEL_AVX512);
+  int w = 2; /* each pg has two pixels */
+  for (int h = 640; h < (640 + 64); h++) {
+    test_cvt_rfc4175_422be10_to_yuv422p8(w, h, MTL_SIMD_LEVEL_AVX512);
+  }
+}
+
+TEST(Cvt, rfc4175_422be10_to_yuv422p8_avx512_vbmi) {
+  test_cvt_rfc4175_422be10_to_yuv422p8(1920, 1080, MTL_SIMD_LEVEL_AVX512_VBMI2);
+  test_cvt_rfc4175_422be10_to_yuv422p8(722, 111, MTL_SIMD_LEVEL_AVX512_VBMI2);
+  int w = 2; /* each pg has two pixels */
+  for (int h = 640; h < (640 + 64); h++) {
+    test_cvt_rfc4175_422be10_to_yuv422p8(w, h, MTL_SIMD_LEVEL_AVX512_VBMI2);
+  }
+}
+
 static void test_cvt_rfc4175_422le10_to_v210(int w, int h, enum mtl_simd_level cvt_level,
                                              enum mtl_simd_level back_level) {
   int ret;
@@ -3888,12 +3979,10 @@ static void frame_malloc(struct st_frame* frame, uint8_t rand, bool align) {
       }
     }
   }
-  for (int plane = 0; plane < planes; plane++) {
-    if (plane == 0)
-      frame->addr[plane] = fb;
-    else
-      frame->addr[plane] =
-          (uint8_t*)frame->addr[plane - 1] + st_frame_plane_size(frame, plane - 1);
+  frame->addr[0] = fb;
+  for (int plane = 1; plane < planes; plane++) {
+    frame->addr[plane] =
+        (uint8_t*)frame->addr[plane - 1] + st_frame_plane_size(frame, plane - 1);
   }
   frame->data_size = frame->buffer_size = fb_size;
 }
@@ -3910,8 +3999,10 @@ static int frame_compare_each_line(struct st_frame* old_frame,
                                    struct st_frame* new_frame) {
   int ret = 0;
   int planes = st_frame_fmt_planes(old_frame->fmt);
+  uint32_t h = st_frame_data_height(old_frame);
+
   for (int plane = 0; plane < planes; plane++) {
-    for (uint32_t line = 0; line < old_frame->height; line++) {
+    for (uint32_t line = 0; line < h; line++) {
       uint8_t* old_addr =
           (uint8_t*)old_frame->addr[plane] + old_frame->linesize[plane] * line;
       uint8_t* new_addr =
@@ -3947,6 +4038,10 @@ static void test_st_frame_convert(struct st_frame* src, struct st_frame* dst,
 
 TEST(Cvt, st_frame_convert_fail_resolution) {
   struct st_frame src, dst, new_src;
+  memset(&src, 0, sizeof(src));
+  memset(&dst, 0, sizeof(dst));
+  memset(&new_src, 0, sizeof(new_src));
+
   src.fmt = new_src.fmt = ST_FRAME_FMT_YUV422RFC4175PG2BE10;
   dst.fmt = ST_FRAME_FMT_Y210;
 
@@ -3969,6 +4064,9 @@ TEST(Cvt, st_frame_convert_fail_resolution) {
 
 TEST(Cvt, st_frame_convert_fail_fmt) {
   struct st_frame src, dst, new_src;
+  memset(&src, 0, sizeof(src));
+  memset(&dst, 0, sizeof(dst));
+  memset(&new_src, 0, sizeof(new_src));
 
   src.width = new_src.width = dst.width = 1920;
   src.height = new_src.height = dst.height = 1080;
@@ -3988,6 +4086,9 @@ TEST(Cvt, st_frame_convert_fail_fmt) {
 
 TEST(Cvt, st_frame_convert_rotate_no_padding) {
   struct st_frame src, dst, new_src;
+  memset(&src, 0, sizeof(src));
+  memset(&dst, 0, sizeof(dst));
+  memset(&new_src, 0, sizeof(new_src));
 
   src.width = new_src.width = dst.width = 1920;
   src.height = new_src.height = dst.height = 1080;
@@ -4028,6 +4129,9 @@ TEST(Cvt, st_frame_convert_rotate_no_padding) {
 
 TEST(Cvt, st_frame_convert_rotate_padding) {
   struct st_frame src, dst, new_src;
+  memset(&src, 0, sizeof(src));
+  memset(&dst, 0, sizeof(dst));
+  memset(&new_src, 0, sizeof(new_src));
 
   src.width = new_src.width = dst.width = 1920;
   src.height = new_src.height = dst.height = 1080;
@@ -4068,6 +4172,9 @@ TEST(Cvt, st_frame_convert_rotate_padding) {
 
 TEST(Cvt, st_frame_convert_rotate_mix_padding) {
   struct st_frame src, dst, new_src;
+  memset(&src, 0, sizeof(src));
+  memset(&dst, 0, sizeof(dst));
+  memset(&new_src, 0, sizeof(new_src));
 
   src.width = new_src.width = dst.width = 1920;
   src.height = new_src.height = dst.height = 1080;

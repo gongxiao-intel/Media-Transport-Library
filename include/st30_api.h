@@ -55,6 +55,11 @@ typedef struct st_rx_audio_session_handle_impl* st30_rx_handle;
  * Control frame pacing in the build stage also.
  */
 #define ST30_TX_FLAG_BUILD_PACING (MTL_BIT32(5))
+/**
+ * Flag bit in flags of struct st30_tx_ops.
+ * If enable the rtcp.
+ */
+#define ST30_TX_FLAG_ENABLE_RTCP (MTL_BIT32(6))
 
 /**
  * Flag bit in flags of struct st30_rx_ops, for non MTL_PMD_DPDK_USER.
@@ -62,6 +67,16 @@ typedef struct st_rx_audio_session_handle_impl* st30_rx_handle;
  * Use st30_rx_get_queue_meta to get the queue meta(queue number etc) info.
  */
 #define ST30_RX_FLAG_DATA_PATH_ONLY (MTL_BIT32(0))
+/**
+ * Flag bit in flags of struct st30_rx_ops.
+ * If enable the rtcp.
+ */
+#define ST30_RX_FLAG_ENABLE_RTCP (MTL_BIT32(1))
+/**
+ * Flag bit in flags of struct st30_rx_ops.
+ * Enable the timing analyze
+ */
+#define ST30_RX_FLAG_ENABLE_TIMING_PARSER (MTL_BIT32(16))
 
 /** default time in the fifo between packet builder and pacing */
 #define ST30_TX_FIFO_DEFAULT_TIME_MS (10)
@@ -239,100 +254,99 @@ struct st30_rx_frame_meta {
  * Include the PCIE port and other required info
  */
 struct st30_tx_ops {
-  /** name */
-  const char* name;
-  /** private data to the callback function */
-  void* priv;
-  /** destination IP address */
+  /** Mandatory. destination IP address */
   uint8_t dip_addr[MTL_SESSION_PORT_MAX][MTL_IP_ADDR_LEN];
-  /** Pcie BDF path like 0000:af:00.0, should align to BDF of mtl_init */
+  /** Mandatory. Pcie BDF path like 0000:af:00.0, should align to BDF of mtl_init */
   char port[MTL_SESSION_PORT_MAX][MTL_PORT_MAX_LEN];
-  /** 1 or 2, num of ports this session attached to */
+  /** Mandatory. 1 or 2, num of ports this session attached to */
   uint8_t num_port;
-  /** UDP source port number, leave as 0 to use same port as dst */
-  uint16_t udp_src_port[MTL_SESSION_PORT_MAX];
-  /** UDP destination port number */
+  /** Mandatory. UDP destination port number */
   uint16_t udp_port[MTL_SESSION_PORT_MAX];
 
-  /** Session payload format */
+  /** Mandatory. Session payload format */
   enum st30_fmt fmt;
-  /** Session channel number */
+  /** Mandatory. Session channel number */
   uint16_t channel;
-  /** Session sampling rate */
+  /** Mandatory. Session sampling rate */
   enum st30_sampling sampling;
-  /** Session packet time */
+  /** Mandatory. Session packet time */
   enum st30_ptime ptime;
-  /** Session streaming type, frame or RTP */
+  /** Mandatory. Session streaming type, frame or RTP */
   enum st30_type type;
-  /** 7 bits payload type define in RFC3550 */
+  /** Mandatory. 7 bits payload type define in RFC3550 */
   uint8_t payload_type;
-  /**
-   * size for each sample group,
-   * use st30_get_sample_size to get the size for different format.
-   */
-  uint16_t sample_size;
-  /**
-   * number of samples for single channel in packet,
-   * use st30_get_sample_num to get the number from different ptime and sampling rate.
-   */
-  uint16_t sample_num;
-  /*
-   * The size of fifo ring which used between the packet builder and pacing.
-   * Leave to zero to use default value: the packet number within
-   * ST30_TX_FIFO_DEFAULT_TIME_MS.
-   */
-  uint16_t fifo_size;
-  /** flags, value in ST30_TX_FLAG_* */
+
+  /** Optional. Synchronization source defined in RFC3550, if zero the session will assign
+   * a random value */
+  uint32_t ssrc;
+  /** Optional. name */
+  const char* name;
+  /** Optional. private data to the callback function */
+  void* priv;
+  /** Optional. see ST30_TX_FLAG_* for possible flags */
   uint32_t flags;
-  /**
-   * tx destination mac address.
-   * Valid if ST30_TX_FLAG_USER_P(R)_MAC is enabled
-   */
-  uint8_t tx_dst_mac[MTL_SESSION_PORT_MAX][MTL_MAC_ADDR_LEN];
 
   /**
+   * Mandatory for ST30_TYPE_FRAME_LEVEL.
    * the frame buffer count requested for one st30 tx session,
-   * only for ST30_TYPE_FRAME_LEVEL.
    */
   uint16_t framebuff_cnt;
   /**
-   * size for each frame buffer, should be multiple of sample_size,
-   * only for ST30_TYPE_FRAME_LEVEL.
+   * Mandatory for ST30_TYPE_FRAME_LEVEL.
+   * size for each frame buffer, should be multiple of packet size(st30_get_packet_size),
    */
   uint32_t framebuff_size;
   /**
-   * ST30_TYPE_FRAME_LEVEL callback when lib require a new frame.
-   * User should provide the next available frame index to next_frame_idx.
-   * It implicit means the frame ownership will be transferred to lib,
-   * only for ST30_TYPE_FRAME_LEVEL.
-   * And only non-block method can be used in this callback as it run from lcore tasklet
-   * routine.
+   * Mandatory for ST30_TYPE_FRAME_LEVEL. the callback when lib require a new frame for
+   * sending. User should provide the next available frame index to next_frame_idx. It
+   * implicit means the frame ownership will be transferred to lib, And only non-block
+   * method can be used in this callback as it run from lcore tasklet routine.
    */
   int (*get_next_frame)(void* priv, uint16_t* next_frame_idx,
                         struct st30_tx_frame_meta* meta);
   /**
-   * ST30_TYPE_FRAME_LEVEL callback when lib finish current frame.
+   * Optional for ST30_TYPE_FRAME_LEVEL. The callback when lib finish sending a frame.
    * frame_idx indicate the frame which finish the transmit.
    * It implicit means the frame ownership is transferred to app.
-   * only for ST30_TYPE_FRAME_LEVEL,
    * And only non-block method can be used in this callback as it run from lcore tasklet
    * routine.
    */
   int (*notify_frame_done)(void* priv, uint16_t frame_idx,
                            struct st30_tx_frame_meta* meta);
 
-  /**
-   * rtp ring size, must be power of 2.
-   * only for ST30_TYPE_RTP_LEVEL
+  /*
+   * Optional. The size of fifo ring which used between the packet builder and pacing.
+   * Leave to zero to use default value: the packet number within
+   * ST30_TX_FIFO_DEFAULT_TIME_MS.
    */
+  uint16_t fifo_size;
+  /** Optional. UDP source port number, leave as 0 to use same port as dst */
+  uint16_t udp_src_port[MTL_SESSION_PORT_MAX];
+  /**
+   * Optional. tx destination mac address.
+   * Valid if ST30_TX_FLAG_USER_P(R)_MAC is enabled
+   */
+  uint8_t tx_dst_mac[MTL_SESSION_PORT_MAX][MTL_MAC_ADDR_LEN];
+
+  /** Mandatory for ST30_TYPE_RTP_LEVEL. rtp ring queue size, must be power of 2 */
   uint32_t rtp_ring_size;
   /**
-   * ST30_TYPE_RTP_LEVEL callback when lib consume one rtp packet,
-   * only for ST30_TYPE_RTP_LEVEL.
-   * And only non-block method can be used in this callback as it run from lcore tasklet
-   * routine.
+   * Optional for ST30_TYPE_RTP_LEVEL. the callback when lib finish the sending of one rtp
+   * packet. And only non-block method can be used in this callback as it run from lcore
+   * tasklet routine.
    */
   int (*notify_rtp_done)(void* priv);
+
+  /**
+   * size for each sample group,
+   * use st30_get_sample_size to get the size for different format.
+   */
+  uint16_t sample_size __mtl_deprecated_msg("Not use anymore, plan to remove");
+  /**
+   * number of samples for single channel in packet,
+   * use st30_get_sample_num to get the number from different ptime and sampling rate.
+   */
+  uint16_t sample_num __mtl_deprecated_msg("Not use anymore, plan to remove");
 };
 
 /**
@@ -340,80 +354,82 @@ struct st30_tx_ops {
  * Include the PCIE port and other required info
  */
 struct st30_rx_ops {
-  /** name */
-  const char* name;
-  /** private data to the callback function */
-  void* priv;
-  /** source IP address of sender */
+  /** Mandatory. source IP address of sender or multicast IP address */
   uint8_t sip_addr[MTL_SESSION_PORT_MAX][MTL_IP_ADDR_LEN];
-  /** 1 or 2, num of ports this session attached to */
+  /** Mandatory. 1 or 2, num of ports this session attached to */
   uint8_t num_port;
-  /** Pcie BDF path like 0000:af:00.0, should align to BDF of mtl_init */
+  /** Mandatory. Pcie BDF path like 0000:af:00.0, should align to BDF of mtl_init */
   char port[MTL_SESSION_PORT_MAX][MTL_PORT_MAX_LEN];
-  /** UDP destination port number */
+  /** Mandatory. UDP dest port number */
   uint16_t udp_port[MTL_SESSION_PORT_MAX];
-  /** flags, value in ST30_RX_FLAG_* */
+
+  /** Mandatory. Session PCM format */
+  enum st30_fmt fmt;
+  /** Mandatory. Session channel number */
+  uint16_t channel;
+  /** Mandatory. Session sampling rate */
+  enum st30_sampling sampling;
+  /** Mandatory. Session packet time */
+  enum st30_ptime ptime;
+  /** Mandatory. Session streaming type, frame or RTP */
+  enum st30_type type;
+  /** Mandatory. 7 bits payload type define in RFC3550 */
+  uint8_t payload_type;
+
+  /** Optional. source filter IP address of multicast */
+  uint8_t mcast_sip_addr[MTL_SESSION_PORT_MAX][MTL_IP_ADDR_LEN];
+  /** Optional. Synchronization source defined in RFC3550, RX session will check the
+   * incoming RTP packets match the ssrc. Leave to zero to disable the ssrc check */
+  uint32_t ssrc;
+  /** Optional. name */
+  const char* name;
+  /** Optional. private data to the callback function */
+  void* priv;
+  /** Optional. see ST30_RX_FLAG_* for possible flags */
   uint32_t flags;
 
-  /** Session PCM format */
-  enum st30_fmt fmt;
-  /** Session channel number */
-  uint16_t channel;
-  /** Session sampling rate */
-  enum st30_sampling sampling;
-  /** Session packet time */
-  enum st30_ptime ptime;
-  /** Session streaming type, frame or RTP */
-  enum st30_type type;
-  /** 7 bits payload type define in RFC3550 */
-  uint8_t payload_type;
   /**
-   * size for each sample group,
-   * use st30_get_sample_size to get the size for different format.
-   */
-  uint16_t sample_size;
-  /**
-   * number of samples for single channel in packet,
-   * use st30_get_sample_num to get the number from different ptime and sampling rate.
-   */
-  uint16_t sample_num;
-
-  /**
+   * Mandatory for ST30_TYPE_FRAME_LEVEL.
    * the frame buffer count requested for one st30 rx session,
-   * only for ST30_TYPE_FRAME_LEVEL.
    */
   uint16_t framebuff_cnt;
   /**
-   * size for each frame buffer, should be multiple of sample_size,
-   * only for ST30_TX_TYPE_FRAME_LEVEL.
+   * Mandatory for ST30_TYPE_FRAME_LEVEL.
+   * size for each frame buffer, should be multiple of packet size(st30_get_packet_size),
    */
   uint32_t framebuff_size;
   /**
-   * ST30_TYPE_FRAME_LEVEL callback when lib finish current frame.
+   * Mandatory for ST30_TYPE_FRAME_LEVEL. callback when lib receive one full frame.
    * frame: point to the address of the frame buf.
    * meta: point to the meta data.
    * return:
    *   - 0: if app consume the frame successful. App should call st30_rx_put_framebuff
    * to return the frame when it finish the handling
-   *   < 0: the error code if app can't handle, lib will free the frame then
-   * the consume of frame.
-   * only for ST30_TX_TYPE_FRAME_LEVEL.
+   *   < 0: the error code if app can't handle, lib will call st30_rx_put_framebuff then.
    * And only non-block method can be used in this callback as it run from lcore tasklet
    * routine.
    */
   int (*notify_frame_ready)(void* priv, void* frame, struct st30_rx_frame_meta* meta);
 
-  /**
-   * rtp ring size, must be power of 2,
-   * only for ST30_TYPE_RTP_LEVEL
-   */
+  /** Mandatory for ST30_TYPE_RTP_LEVEL. rtp ring queue size, must be power of 2 */
   uint32_t rtp_ring_size;
   /**
-   * ST30_TYPE_RTP_LEVEL callback when lib receive one rtp packet.
+   * Optional for ST20_TYPE_RTP_LEVEL. The callback when lib receive one rtp packet.
    * And only non-block method can be used in this callback as it run from lcore tasklet
    * routine.
    */
   int (*notify_rtp_ready)(void* priv);
+
+  /**
+   * size for each sample group,
+   * use st30_get_sample_size to get the size for different format.
+   */
+  uint16_t sample_size __mtl_deprecated_msg("Not use anymore, plan to remove");
+  /**
+   * number of samples for single channel in packet,
+   * use st30_get_sample_num to get the number from different ptime and sampling rate.
+   */
+  uint16_t sample_num __mtl_deprecated_msg("Not use anymore, plan to remove");
 };
 
 /**
@@ -544,6 +560,24 @@ int st30_get_sample_num(enum st30_ptime ptime, enum st30_sampling sampling);
  *   - <0: Error code if fail.
  */
 int st30_get_sample_rate(enum st30_sampling sampling);
+
+/**
+ * Retrieve the size for each pkt.
+ *
+ * @param fmt
+ *   The st2110-30(audio) format.
+ * @param ptime
+ *   The st2110-30(audio) packet time.
+ * @param sampling
+ *   The st2110-30(audio) sampling rate.
+ * @param channel
+ *   The st2110-30(audio) channel.
+ * @return
+ *   - >0 the clock rate.
+ *   - <0: Error code if fail.
+ */
+int st30_get_packet_size(enum st30_fmt fmt, enum st30_ptime ptime,
+                         enum st30_sampling sampling, uint16_t channel);
 
 /**
  * Create one rx st2110-30(audio) session.

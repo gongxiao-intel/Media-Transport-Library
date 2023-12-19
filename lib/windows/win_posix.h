@@ -17,9 +17,14 @@
 #include <windows.h>
 // clang-format on
 
+#ifndef MTL_MAY_UNUSED
+#define MTL_MAY_UNUSED(x) (void)(x)
+#endif
+
 #ifdef interface
 #undef interface
 #endif
+
 #define CLOCK_MONOTONIC_RAW CLOCK_MONOTONIC
 
 #define ETH_ALEN 6
@@ -51,10 +56,10 @@ struct ether_header {
 } __attribute__((__packed__));
 
 struct udphdr {
-  u_short uh_sport; /* source port */
-  u_short uh_dport; /* destination port */
-  short uh_ulen;    /* udp length */
-  u_short uh_sum;   /* udp checksum */
+  u_short source; /* source port */
+  u_short dest;   /* destination port */
+  u_short len;    /* udp length */
+  u_short check;  /* udp checksum */
 };
 #pragma pack(pop)
 
@@ -106,9 +111,17 @@ struct shmid_ds {
   void* shm_unused3;
 };
 
-static int inline flock(int fd, int operation) { return 0; }
+static int inline flock(int fd, int operation) {
+  MTL_MAY_UNUSED(fd);
+  MTL_MAY_UNUSED(operation);
+  return 0;
+}
 
-static key_t inline ftok(const char* path, int id) { return 0; }
+static key_t inline ftok(const char* path, int id) {
+  MTL_MAY_UNUSED(path);
+  MTL_MAY_UNUSED(id);
+  return 0;
+}
 
 void* shmat(int shmid, const void* shmaddr, int shmflg);
 int shmctl(int shmid, int cmd, struct shmid_ds* buf);
@@ -124,6 +137,7 @@ typedef rte_cpuset_t cpu_set_t;
 
 #define localtime_r(T, Tm) (localtime_s(Tm, T) ? NULL : Tm)
 
+pthread_t pthread_self(void);
 int pthread_cond_signal(pthread_cond_t* cv);
 int pthread_cond_init(pthread_cond_t* cv, const pthread_condattr_t* a);
 int pthread_cond_wait(pthread_cond_t* cv, pthread_mutex_t* external_mutex);
@@ -131,6 +145,8 @@ int pthread_cond_timedwait(pthread_cond_t* cond, pthread_mutex_t* mutex,
                            const struct timespec* time);
 int pthread_cond_destroy(pthread_cond_t* cv);
 int pthread_mutex_trylock(pthread_mutex_t* mutex);
+
+int clock_gettime(int clk_id, struct timespec* tp); /* use precise time for windows */
 
 #ifdef __MTL_LIB_BUILD__
 static inline pid_t getpid() { return GetCurrentProcessId(); }

@@ -82,7 +82,8 @@ List all interfaces that can be used by app
 
  **rx_queues_cnt (int):** the number of tx queues(optional). Default it will calculated based on the sessions number in this configuration.
 
-> Session group contains a group of sessions which use some common settings, there can be 0 or multiple video/audio/ancillary sessions in one group, and there can be 0 or multiple tx/rx session groups in the following parts in case you have multiple destination IP. (see [example config](../config/test_tx_1port_1v_2dest.json))
+> Session group contains a group of sessions which use some common settings, there can be 0 or multiple video/audio/ancillary sessions in one group, and there can be 0 or multiple tx/rx session groups in the following parts in case you have multiple destination IP.
+> See [tx_multi_dest](../config/test_tx_1port_2v_2dest.json) and [rx_multi_dest](../config/test_rx_1port_2v_2dest.json) for multiple destination reference.
 
 ### TX Sessions (array of tx session groups)
 
@@ -100,15 +101,13 @@ Items in each element of the "video" array
 
 ​ **type (string):** `"frame", "rtp", "slice"` app->lib data type
 
-​ **pacing (string):** `"gap", "linear"` pacing type
+​ **pacing (string):** `"narrow", "wide", "linear"` pacing type
 
-​ **packing (string):** `"GPM_SL", "BPM", "GPM"` packing mode, default is "GPM_SL" single line mode
+​ **packing (string):** `"BPM", "GPM", "GPM_SL"` packing mode, default is "BPM" single line mode
 
 ​ **start_port (int):** `0~65535` start udp port for copies of sessions
 
 ​ **payload_type (int):** `0~127` 7 bits payload type define in RFC3550
-
-​ **tr_offset (string):** `"default", "none"` tr_offset for frame
 
 ​ **video_format (string):** `"i1080p59", "i1080p50", "i1080p29", "i720p59", "i720p50", "i720p29", "i2160p59", "i2160p50", "i2160p29"` video format
 
@@ -162,6 +161,8 @@ Common settings for following sessions in the group:
 
 ​ **ip (array-string):** the transmitter's IP or the multicast group IP, at least 1 primary IP, the second is redundant IP
 
+​ **mcast_src_ip (array-string):** the source IP filter for multicast(optional), assume primary and redundant sessions use different multicast group, if one of the source filter set, another is allowed to be set as 0.0.0.0(any source)
+
 ​ **interfaces (array-int):** interfaces/ports used by the sessions, at least 1 primary interface, the second is redundant interface
 
 #### video (array of video sessions) for RX
@@ -172,13 +173,9 @@ Items in each element of the "video" array
 
 ​ **type (string):** `"frame", "rtp", "slice"` lib->app data type
 
-​ **pacing (string):** `"gap", "linear"` pacing type
-
 ​ **start_port (int):** `0~65535` start udp port for copies of sessions
 
 ​ **payload_type (int):** `0~127` 7 bits payload type define in RFC3550
-
-​ **tr_offset (string):** `"default", "none"` tr_offset for frame
 
 ​ **video_format (string):** `"i1080p59", "i1080p50", "i1080p29", "i720p59", "i720p50", "i720p29", "i2160p59", "i2160p50", "i2160p29"` video format
 
@@ -231,3 +228,5 @@ Items in each element of the "ancillary" array
  **sch_session_quota (int):** The quota unit in 1080p59 yuv422_10bit for one single scheduler(core), (optional). Default it will use the quota define in the lib.
 
  **rss_mode (string):** `"none", "l3_l4", "l3"` (optional). Default it will be detected by lib.
+
+ **log_file (string):** set log file for mtl log. If you're initiating multiple RxTxApp processes simultaneously, please ensure each process has a unique filename path. Default the log is writing to stderr.

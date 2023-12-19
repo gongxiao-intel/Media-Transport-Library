@@ -75,6 +75,10 @@ static int tx_st20p_next_frame(void* priv, uint16_t* next_frame_idx,
     meta->tfmt = frame->tfmt;
     meta->timestamp = frame->timestamp;
   }
+  if (framebuff->user_meta_data_size) {
+    meta->user_meta = framebuff->user_meta;
+    meta->user_meta_size = framebuff->user_meta_data_size;
+  }
   /* point to next */
   ctx->framebuff_consumer_idx = tx_st20p_next_idx(ctx, framebuff->idx);
   mt_pthread_mutex_unlock(&ctx->lock);
@@ -231,7 +235,7 @@ static int tx_st20p_create_transport(struct mtl_main_impl* impl, struct st20p_tx
   ops_tx.num_port = RTE_MIN(ops->port.num_port, MTL_SESSION_PORT_MAX);
   for (int i = 0; i < ops_tx.num_port; i++) {
     memcpy(ops_tx.dip_addr[i], ops->port.dip_addr[i], MTL_IP_ADDR_LEN);
-    strncpy(ops_tx.port[i], ops->port.port[i], MTL_PORT_MAX_LEN);
+    snprintf(ops_tx.port[i], MTL_PORT_MAX_LEN, "%s", ops->port.port[i]);
     ops_tx.udp_src_port[i] = ops->port.udp_src_port[i];
     ops_tx.udp_port[i] = ops->port.udp_port[i];
   }
@@ -248,13 +252,18 @@ static int tx_st20p_create_transport(struct mtl_main_impl* impl, struct st20p_tx
   ops_tx.pacing = ST21_PACING_NARROW;
   ops_tx.start_vrx = ops->start_vrx;
   ops_tx.pad_interval = ops->pad_interval;
+  ops_tx.rtp_timestamp_delta_us = ops->rtp_timestamp_delta_us;
+  ops_tx.tx_hang_detect_ms = ops->tx_hang_detect_ms;
   ops_tx.width = ops->width;
   ops_tx.height = ops->height;
   ops_tx.fps = ops->fps;
+  ops_tx.pacing = ops->transport_pacing;
+  ops_tx.packing = ops->transport_packing;
   ops_tx.fmt = ops->transport_fmt;
   ops_tx.interlaced = ops->interlaced;
   ops_tx.linesize = ops->transport_linesize;
   ops_tx.payload_type = ops->port.payload_type;
+  ops_tx.ssrc = ops->port.ssrc;
   ops_tx.type = ST20_TYPE_FRAME_LEVEL;
   ops_tx.framebuff_cnt = ops->framebuff_cnt;
   ops_tx.get_next_frame = tx_st20p_next_frame;
@@ -268,6 +277,15 @@ static int tx_st20p_create_transport(struct mtl_main_impl* impl, struct st20p_tx
   if (ops->flags & ST20P_TX_FLAG_ENABLE_VSYNC) ops_tx.flags |= ST20_TX_FLAG_ENABLE_VSYNC;
   if (ops->flags & ST20P_TX_FLAG_DISABLE_STATIC_PAD_P)
     ops_tx.flags |= ST20_TX_FLAG_DISABLE_STATIC_PAD_P;
+  if (ops->flags & ST20P_TX_FLAG_ENABLE_RTCP) {
+    ops_tx.flags |= ST20_TX_FLAG_ENABLE_RTCP;
+    ops_tx.rtcp = ops->rtcp;
+  }
+  if (ops->flags & ST20P_TX_FLAG_RTP_TIMESTAMP_FIRST_PKT)
+    ops_tx.flags |= ST20_TX_FLAG_RTP_TIMESTAMP_FIRST_PKT;
+  if (ops->flags & ST20P_TX_FLAG_RTP_TIMESTAMP_EPOCH)
+    ops_tx.flags |= ST20_TX_FLAG_RTP_TIMESTAMP_EPOCH;
+  if (ops->flags & ST20P_TX_FLAG_DISABLE_BULK) ops_tx.flags |= ST20_TX_FLAG_DISABLE_BULK;
 
   transport = st20_tx_create(impl, &ops_tx);
   if (!transport) {
@@ -312,6 +330,12 @@ static int tx_st20p_uinit_src_fbs(struct st20p_tx_ctx* ctx) {
           mt_rte_free(ctx->framebuffs[i].src.addr[0]);
           ctx->framebuffs[i].src.addr[0] = NULL;
         }
+      }
+    }
+    for (uint16_t i = 0; i < ctx->framebuff_cnt; i++) {
+      if (ctx->framebuffs[i].user_meta) {
+        mt_rte_free(ctx->framebuffs[i].user_meta);
+        ctx->framebuffs[i].user_meta = NULL;
       }
     }
     mt_rte_free(ctx->framebuffs);
@@ -372,6 +396,16 @@ static int tx_st20p_init_src_fbs(struct mtl_main_impl* impl, struct st20p_tx_ctx
       }
       frames[i].src.priv = &frames[i];
     }
+    /* init user meta */
+    frames[i].user_meta_buffer_size =
+        impl->pkt_udp_suggest_max_size - sizeof(struct st20_rfc4175_rtp_hdr);
+    frames[i].user_meta = mt_rte_zmalloc_socket(frames[i].user_meta_buffer_size, soc_id);
+    if (!frames[i].user_meta) {
+      err("%s(%d), user_meta malloc %" PRIu64 " fail at %d\n", __func__, idx,
+          frames[i].user_meta_buffer_size, i);
+      tx_st20p_uinit_src_fbs(ctx);
+      return -ENOMEM;
+    }
   }
   info("%s(%d), size %" PRIu64 " fmt %d with %u frames\n", __func__, idx, src_size,
        ops->transport_fmt, ctx->framebuff_cnt);
@@ -388,6 +422,7 @@ static int tx_st20p_get_converter(struct mtl_main_impl* impl, struct st20p_tx_ct
   req.req.width = ops->width;
   req.req.height = ops->height;
   req.req.fps = ops->fps;
+  req.req.interlaced = ops->interlaced;
   req.req.input_fmt = ops->input_fmt;
   req.req.output_fmt = st_frame_fmt_from_transport(ops->transport_fmt);
   req.req.framebuff_cnt = ops->framebuff_cnt;
@@ -447,10 +482,12 @@ struct st_frame* st20p_tx_get_frame(st20p_tx_handle handle) {
 
   dbg("%s(%d), frame %u succ\n", __func__, idx, framebuff->idx);
   struct st_frame* frame = tx_st20p_user_frame(ctx, framebuff);
-  if (ctx->ops.interlaced) { /* init second_field but user still can customize also */
+  if (ctx->ops.interlaced) { /* init second_field but user still can customize */
     frame->second_field = ctx->second_field;
     ctx->second_field = ctx->second_field ? false : true;
   }
+  frame->user_meta = NULL;
+  frame->user_meta_size = 0;
   return frame;
 }
 
@@ -469,6 +506,30 @@ int st20p_tx_put_frame(st20p_tx_handle handle, struct st_frame* frame) {
     err("%s(%d), frame %u not in user %d\n", __func__, idx, producer_idx,
         framebuff->stat);
     return -EIO;
+  }
+
+  if (ctx->ops.flags & ST20P_TX_FLAG_EXT_FRAME) {
+    err("%s(%d), EXT_FRAME flag enabled, use st20p_tx_put_ext_frame instead\n", __func__,
+        idx);
+    return -EIO;
+  }
+
+  framebuff->user_meta_data_size = 0;
+  if (frame->user_meta) {
+    if (frame->user_meta_size > framebuff->user_meta_buffer_size) {
+      err("%s(%d), frame %u user meta size %" PRId64 " too large\n", __func__, idx,
+          producer_idx, frame->user_meta_size);
+      framebuff->stat = ST20P_TX_FRAME_FREE;
+      return -EIO;
+    }
+
+    /* copy user meta to framebuff user_meta */
+    rte_memcpy(framebuff->user_meta, frame->user_meta, frame->user_meta_size);
+    framebuff->user_meta_data_size = frame->user_meta_size;
+  }
+
+  if (ctx->ops.interlaced) { /* update second_field */
+    framebuff->dst.second_field = framebuff->src.second_field = frame->second_field;
   }
 
   if (ctx->internal_converter) { /* convert internal */
@@ -507,6 +568,10 @@ int st20p_tx_put_ext_frame(st20p_tx_handle handle, struct st_frame* frame,
     err("%s(%d), frame %u not in user %d\n", __func__, idx, producer_idx,
         framebuff->stat);
     return -EIO;
+  }
+
+  if (ctx->ops.interlaced) { /* update second_field */
+    framebuff->dst.second_field = framebuff->src.second_field = frame->second_field;
   }
 
   uint8_t planes = st_frame_fmt_planes(framebuff->src.fmt);
@@ -556,11 +621,14 @@ int st20p_tx_put_ext_frame(st20p_tx_handle handle, struct st_frame* frame,
 }
 
 st20p_tx_handle st20p_tx_create(mtl_handle mt, struct st20p_tx_ops* ops) {
+  static int st20p_tx_idx;
   struct mtl_main_impl* impl = mt;
   struct st20p_tx_ctx* ctx;
   int ret;
-  int idx = 0; /* todo */
+  int idx = st20p_tx_idx;
   size_t src_size;
+
+  notice("%s, start for %s\n", __func__, mt_string_safe(ops->name));
 
   if (impl->type != MT_HANDLE_MAIN) {
     err("%s, invalid type %d\n", __func__, impl->type);
@@ -595,7 +663,11 @@ st20p_tx_handle st20p_tx_create(mtl_handle mt, struct st20p_tx_ops* ops) {
   mt_pthread_mutex_init(&ctx->lock, NULL);
 
   /* copy ops */
-  strncpy(ctx->ops_name, ops->name, ST_MAX_NAME_LEN - 1);
+  if (ops->name) {
+    snprintf(ctx->ops_name, sizeof(ctx->ops_name), "%s", ops->name);
+  } else {
+    snprintf(ctx->ops_name, sizeof(ctx->ops_name), "ST20P_TX_%d", idx);
+  }
   ctx->ops = *ops;
 
   /* get one suitable convert device */
@@ -626,8 +698,9 @@ st20p_tx_handle st20p_tx_create(mtl_handle mt, struct st20p_tx_ops* ops) {
 
   /* all ready now */
   ctx->ready = true;
-  info("%s(%d), transport fmt %s, input fmt: %s\n", __func__, idx,
-       st20_frame_fmt_name(ops->transport_fmt), st_frame_fmt_name(ops->input_fmt));
+  notice("%s(%d), transport fmt %s, input fmt: %s\n", __func__, idx,
+         st20_frame_fmt_name(ops->transport_fmt), st_frame_fmt_name(ops->input_fmt));
+  st20p_tx_idx++;
 
   if (ctx->ops.notify_frame_available) { /* notify app */
     ctx->ops.notify_frame_available(ctx->ops.priv);
@@ -644,6 +717,8 @@ int st20p_tx_free(st20p_tx_handle handle) {
     err("%s(%d), invalid type %d\n", __func__, ctx->idx, ctx->type);
     return -EIO;
   }
+
+  notice("%s(%d), start\n", __func__, ctx->idx);
 
   if (ctx->convert_impl) {
     st20_put_converter(impl, ctx->convert_impl);
@@ -662,6 +737,7 @@ int st20p_tx_free(st20p_tx_handle handle) {
   tx_st20p_uinit_src_fbs(ctx);
 
   mt_pthread_mutex_destroy(&ctx->lock);
+  notice("%s(%d), succ\n", __func__, ctx->idx);
   mt_rte_free(ctx);
 
   return 0;
@@ -681,6 +757,12 @@ void* st20p_tx_get_fb_addr(st20p_tx_handle handle, uint16_t idx) {
         ctx->framebuff_cnt);
     return NULL;
   }
+
+  if (ctx->ops.flags & ST20P_TX_FLAG_EXT_FRAME) {
+    err("%s(%d), not known as EXT_FRAME flag enabled\n", __func__, cidx);
+    return NULL;
+  }
+
   if (ctx->derive) /* derive dst to src frame */
     return ctx->framebuffs[idx].dst.addr[0];
   return ctx->framebuffs[idx].src.addr[0];
@@ -708,4 +790,41 @@ int st20p_tx_get_sch_idx(st20p_tx_handle handle) {
   }
 
   return st20_tx_get_sch_idx(ctx->transport);
+}
+
+int st20p_tx_get_port_stats(st20p_tx_handle handle, enum mtl_session_port port,
+                            struct st20_tx_port_status* stats) {
+  struct st20p_tx_ctx* ctx = handle;
+  int cidx = ctx->idx;
+
+  if (ctx->type != MT_ST20_HANDLE_PIPELINE_TX) {
+    err("%s(%d), invalid type %d\n", __func__, cidx, ctx->type);
+    return 0;
+  }
+
+  return st20_tx_get_port_stats(ctx->transport, port, stats);
+}
+
+int st20p_tx_reset_port_stats(st20p_tx_handle handle, enum mtl_session_port port) {
+  struct st20p_tx_ctx* ctx = handle;
+  int cidx = ctx->idx;
+
+  if (ctx->type != MT_ST20_HANDLE_PIPELINE_TX) {
+    err("%s(%d), invalid type %d\n", __func__, cidx, ctx->type);
+    return 0;
+  }
+
+  return st20_tx_reset_port_stats(ctx->transport, port);
+}
+
+int st20p_tx_update_destination(st20p_tx_handle handle, struct st_tx_dest_info* dst) {
+  struct st20p_tx_ctx* ctx = handle;
+  int cidx = ctx->idx;
+
+  if (ctx->type != MT_ST20_HANDLE_PIPELINE_TX) {
+    err("%s(%d), invalid type %d\n", __func__, cidx, ctx->type);
+    return 0;
+  }
+
+  return st20_tx_update_destination(ctx->transport, dst);
 }

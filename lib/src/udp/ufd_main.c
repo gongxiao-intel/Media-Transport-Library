@@ -91,6 +91,7 @@ static int ufd_parse_interfaces(struct mufd_init_params* init, json_object* obj,
     MUDP_ERR_RET(EINVAL);
   }
   snprintf(p->port[port], MTL_PORT_MAX_LEN, "%s", name);
+  enum mtl_pmd_type pmd = mtl_pmd_by_port_name(name);
 
   json_object* obj_item = mt_json_object_get(obj, "proto");
   if (obj_item) {
@@ -105,7 +106,7 @@ static int ufd_parse_interfaces(struct mufd_init_params* init, json_object* obj,
     }
   }
 
-  if (p->net_proto[port] == MTL_PROTO_STATIC) {
+  if ((p->net_proto[port] == MTL_PROTO_STATIC) && (pmd == MTL_PMD_DPDK_USER)) {
     obj_item = mt_json_object_get(obj, "ip");
     if (!obj_item) {
       err("%s, no ip in the json interface\n", __func__);
@@ -353,6 +354,18 @@ out:
   return ret;
 }
 
+static int ufd_set_afxdp(struct ufd_mt_ctx* ctx) {
+  struct mtl_init_params* p = &ctx->init_params.mt_params;
+
+  for (uint8_t i = 0; i < p->num_ports; i++) {
+    p->pmd[i] = mtl_pmd_by_port_name(p->port[i]);
+    if (!mtl_pmd_is_af_xdp(p->pmd[i])) continue;
+    p->xdp_info[i].start_queue = 1;
+  }
+
+  return 0;
+}
+
 static int ufd_config_init(struct ufd_mt_ctx* ctx) {
   const char* cfg_path = getenv(MUFD_CFG_ENV_NAME);
   int ret;
@@ -409,9 +422,6 @@ static struct ufd_mt_ctx* ufd_create_mt_ctx(void) {
     }
   }
 
-  /* force udp mode */
-  p->transport = MTL_TRANSPORT_UDP;
-
   /* assign a default if not set by user */
   if (!ctx->init_params.slots_nb_max) ctx->init_params.slots_nb_max = 1024;
   /* ufd is assigned to top of INT, the bottom fd is used by OS */
@@ -423,6 +433,8 @@ static struct ufd_mt_ctx* ufd_create_mt_ctx(void) {
   if ((p->flags & (MTL_FLAG_SHARED_TX_QUEUE | MTL_FLAG_SHARED_RX_QUEUE)) &&
       (p->flags & MTL_FLAG_UDP_LCORE))
     p->tasklets_nb_per_sch = ctx->init_params.slots_nb_max + 8;
+
+  ufd_set_afxdp(ctx);
 
   ctx->mt = mtl_init(p);
   if (!ctx->mt) {
@@ -517,7 +529,7 @@ int mufd_socket_port(int domain, int type, int protocol, enum mtl_port port) {
     err("%s, fail to get ufd mt ctx\n", __func__);
     MUDP_ERR_RET(EIO);
   }
-  if ((port < 0) || (port >= ctx->init_params.mt_params.num_ports)) {
+  if (port >= ctx->init_params.mt_params.num_ports) {
     err("%s, invalid port %d\n", __func__, port);
     MUDP_ERR_RET(EINVAL);
   }
@@ -661,6 +673,7 @@ int mufd_setsockopt(int sockfd, int level, int optname, const void* optval,
 int mufd_fcntl(int sockfd, int cmd, va_list args) {
   struct ufd_slot* slot = ufd_fd2slot(sockfd);
   int idx = slot->idx;
+  MTL_MAY_UNUSED(args);
 
 #ifdef WINDOWSENV
   err("%s(%d), invalid cmd %d, not support on windows\n", __func__, idx, cmd);

@@ -1,0 +1,26 @@
+version: '3'
+
+services:
+  imtl:
+    image: mtl:latest
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    devices:
+      - "/dev/vfio:/dev/vfio" # or add /dev/vfio/vfio and /dev/vfio/<specific_device>
+    volumes:
+      - "/var/run/imtl:/var/run/imtl" # For connection with MTL Manager
+    # For kernel / AF_XDP backend
+    # network_mode: host
+    cap_add:
+      - SYS_NICE
+      - IPC_LOCK
+
+      # For kernel / AF_XDP backend
+      # - NET_ADMIN
+      # - NET_RAW
+      # - CAP_BPF
+      
+      # For Adjtime
+      # - SYS_TIME

@@ -16,17 +16,17 @@ inputs:
   dpdk:
     description: DPDK support version on Media Transport
     required: true
-    default: 23.03
+    default: 23.11
   tap:
     description: Enable TAP device
     required: true
     default: true
 
 runs:
-  using: "composite"
+  using: 'composite'
   steps:
     - name: Harden Runner
-      uses: step-security/harden-runner@55d479fb1c5bcad5a4f9099a5d9f37c8857b2845 # v2.4.1
+      uses: step-security/harden-runner@eb238b55efaa70779f274895e782ed17c84f2895 # v2.6.1
       with:
         egress-policy: audit
 
@@ -41,10 +41,10 @@ runs:
           unzip
           zip
         pacboy: >-
+          pkgconf:p
           openssl:p
           gcc:p
           meson:p
-          pkg-config:p
           json-c:p
           libpcap:p
           gtest:p
@@ -59,7 +59,7 @@ runs:
           ffnvcodec-headers:p
           nasm:p
           yasm:p
-            
+
     - name: Install tools
       shell: msys2 {0}
       run: |
@@ -72,14 +72,14 @@ runs:
         make && make install
 
     - name: Checkout IMTL repo
-      uses: actions/checkout@c85c95e3d7251135ab7dc9ce3241c5835cc595a9 # v3.5.3
+      uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
       with:
         repository: 'OpenVisualCloud/Media-Transport-Library'
         ref: main
         path: .
 
     - name: Checkout DPDK repo
-      uses: actions/checkout@c85c95e3d7251135ab7dc9ce3241c5835cc595a9 # v3.5.3
+      uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
       with:
         repository: 'DPDK/dpdk'
         ref: v${{inputs.dpdk}}
@@ -93,7 +93,7 @@ runs:
         ls *.patch | xargs -I{} bash -c 'if [[ $(sed -n '1p' "{}") =~ ^../.*\.patch$ ]]; then cp "$(cat "{}")" "{}"; fi'
         cd windows
         ls *.patch | xargs -I{} bash -c 'if [[ $(sed -n '1p' "{}") =~ ^../.*\.patch$ ]]; then cp "$(cat "{}")" "{}"; fi'
-    
+
     - name: Apply patches for DPDK
       shell: bash
       run: |

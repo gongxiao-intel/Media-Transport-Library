@@ -10,6 +10,7 @@ static int app_tx_anc_next_frame(void* priv, uint16_t* next_frame_idx,
   int ret;
   uint16_t consumer_idx = s->framebuff_consumer_idx;
   struct st_tx_frame* framebuff = &s->framebuffs[consumer_idx];
+  MTL_MAY_UNUSED(meta);
 
   st_pthread_mutex_lock(&s->st40_wake_mutex);
   if (ST_TX_FRAME_READY == framebuff->stat) {
@@ -38,6 +39,7 @@ static int app_tx_anc_frame_done(void* priv, uint16_t frame_idx,
   struct st_app_tx_anc_session* s = priv;
   int ret;
   struct st_tx_frame* framebuff = &s->framebuffs[frame_idx];
+  MTL_MAY_UNUSED(meta);
 
   st_pthread_mutex_lock(&s->st40_wake_mutex);
   if (ST_TX_FRAME_IN_TRANSMITTING == framebuff->stat) {
@@ -165,7 +167,7 @@ static void* app_tx_anc_pcap_thread(void* arg) {
         if (ip_hdr->ip_p == IPPROTO_UDP) {
           udp_hdr =
               (struct udphdr*)(packet + sizeof(struct ether_header) + sizeof(struct ip));
-          udp_data_len = ntohs(udp_hdr->uh_ulen) - sizeof(struct udphdr);
+          udp_data_len = ntohs(udp_hdr->len) - sizeof(struct udphdr);
           mtl_memcpy(usrptr,
                      packet + sizeof(struct ether_header) + sizeof(struct ip) +
                          sizeof(struct udphdr),
@@ -286,7 +288,12 @@ static int app_tx_anc_open_source(struct st_app_tx_anc_session* s) {
 
     s->st40_source_fd = st_open(s->st40_source_url, O_RDONLY);
     if (s->st40_source_fd >= 0) {
-      fstat(s->st40_source_fd, &i);
+      if (fstat(s->st40_source_fd, &i) < 0) {
+        err("%s, fstat %s fail\n", __func__, s->st40_source_url);
+        close(s->st40_source_fd);
+        s->st40_source_fd = -1;
+        return -EIO;
+      }
 
       uint8_t* m = mmap(NULL, i.st_size, PROT_READ, MAP_SHARED, s->st40_source_fd, 0);
 
@@ -296,6 +303,8 @@ static int app_tx_anc_open_source(struct st_app_tx_anc_session* s) {
         s->st40_source_end = m + i.st_size;
       } else {
         err("%s, mmap fail '%s'\n", __func__, s->st40_source_url);
+        close(s->st40_source_fd);
+        s->st40_source_fd = -1;
         return -EIO;
       }
     } else {
@@ -332,6 +341,7 @@ static int app_tx_anc_close_source(struct st_app_tx_anc_session* s) {
 
 static int app_tx_anc_start_source(struct st_app_tx_anc_session* s) {
   int ret = -EINVAL;
+  int idx = s->idx;
 
   s->st40_app_thread_stop = false;
   if (s->st40_pcap_input)
@@ -341,9 +351,13 @@ static int app_tx_anc_start_source(struct st_app_tx_anc_session* s) {
   else
     ret = pthread_create(&s->st40_app_thread, NULL, app_tx_anc_frame_thread, (void*)s);
   if (ret < 0) {
-    err("%s, thread create fail err = %d\n", __func__, ret);
+    err("%s(%d), thread create fail err = %d\n", __func__, idx, ret);
     return ret;
   }
+
+  char thread_name[32];
+  snprintf(thread_name, sizeof(thread_name), "tx_anc_%d", idx);
+  mtl_thread_setname(s->st40_app_thread, thread_name);
 
   return 0;
 }
@@ -416,9 +430,8 @@ static int app_tx_anc_init(struct st_app_context* ctx, st_json_ancillary_session
          anc ? st_json_ip(ctx, &anc->base, MTL_SESSION_PORT_P)
              : ctx->tx_dip_addr[MTL_PORT_P],
          MTL_IP_ADDR_LEN);
-  strncpy(ops.port[MTL_SESSION_PORT_P],
-          anc ? anc->base.inf[MTL_SESSION_PORT_P]->name : ctx->para.port[MTL_PORT_P],
-          MTL_PORT_MAX_LEN);
+  snprintf(ops.port[MTL_SESSION_PORT_P], MTL_PORT_MAX_LEN, "%s",
+           anc ? anc->base.inf[MTL_SESSION_PORT_P]->name : ctx->para.port[MTL_PORT_P]);
   ops.udp_port[MTL_SESSION_PORT_P] = anc ? anc->base.udp_port : (10200 + s->idx);
   if (ctx->has_tx_dst_mac[MTL_PORT_P]) {
     memcpy(&ops.tx_dst_mac[MTL_SESSION_PORT_P][0], ctx->tx_dst_mac[MTL_PORT_P],
@@ -430,9 +443,8 @@ static int app_tx_anc_init(struct st_app_context* ctx, st_json_ancillary_session
            anc ? st_json_ip(ctx, &anc->base, MTL_SESSION_PORT_R)
                : ctx->tx_dip_addr[MTL_PORT_R],
            MTL_IP_ADDR_LEN);
-    strncpy(ops.port[MTL_SESSION_PORT_R],
-            anc ? anc->base.inf[MTL_SESSION_PORT_R]->name : ctx->para.port[MTL_PORT_R],
-            MTL_PORT_MAX_LEN);
+    snprintf(ops.port[MTL_SESSION_PORT_R], MTL_PORT_MAX_LEN, "%s",
+             anc ? anc->base.inf[MTL_SESSION_PORT_R]->name : ctx->para.port[MTL_PORT_R]);
     ops.udp_port[MTL_SESSION_PORT_R] = anc ? anc->base.udp_port : (10200 + s->idx);
     if (ctx->has_tx_dst_mac[MTL_PORT_R]) {
       memcpy(&ops.tx_dst_mac[MTL_SESSION_PORT_R][0], ctx->tx_dst_mac[MTL_PORT_R],
@@ -463,6 +475,7 @@ static int app_tx_anc_init(struct st_app_context* ctx, st_json_ancillary_session
     else
       ops.rtp_ring_size = 16;
   }
+  if (anc && anc->enable_rtcp) ops.flags |= ST40_TX_FLAG_ENABLE_RTCP;
 
   handle = st40_tx_create(ctx->st, &ops);
   if (!handle) {
@@ -472,8 +485,8 @@ static int app_tx_anc_init(struct st_app_context* ctx, st_json_ancillary_session
   }
 
   s->handle = handle;
-  strncpy(s->st40_source_url, anc ? anc->info.anc_url : ctx->tx_anc_url,
-          sizeof(s->st40_source_url));
+  snprintf(s->st40_source_url, sizeof(s->st40_source_url), "%s",
+           anc ? anc->info.anc_url : ctx->tx_anc_url);
 
   ret = app_tx_anc_open_source(s);
   if (ret < 0) {

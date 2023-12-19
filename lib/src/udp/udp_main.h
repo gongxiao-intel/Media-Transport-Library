@@ -48,8 +48,9 @@ struct mudp_impl {
 
   enum mtl_port port;
   struct mt_udp_hdr hdr;
-  uint16_t ipv4_packet_id;
   uint16_t bind_port;
+
+  int fallback_fd; /* for MTL_PMD_KERNEL_SOCKET */
 
   uint64_t txq_bps; /* bit per sec for q */
   struct mt_txq_entry* txq;

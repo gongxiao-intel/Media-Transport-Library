@@ -157,6 +157,7 @@ static int tx_video_frame_done(void* priv, uint16_t frame_idx,
                                struct st20_tx_frame_meta* meta) {
   struct tx_ctx* s = priv;
   struct split_fwd_sample_ctx* app = s->app;
+  MTL_MAY_UNUSED(frame_idx);
 
   /* try to release the sending frame */
   if (app->ready) sending_frames_delete(app, meta->timestamp);
@@ -220,7 +221,8 @@ int main(int argc, char** argv) {
   ops_rx.num_port = 1;
   memcpy(ops_rx.sip_addr[MTL_SESSION_PORT_P], ctx.rx_sip_addr[MTL_PORT_P],
          MTL_IP_ADDR_LEN);
-  strncpy(ops_rx.port[MTL_SESSION_PORT_P], ctx.param.port[MTL_PORT_P], MTL_PORT_MAX_LEN);
+  snprintf(ops_rx.port[MTL_SESSION_PORT_P], MTL_PORT_MAX_LEN, "%s",
+           ctx.param.port[MTL_PORT_P]);
   ops_rx.udp_port[MTL_SESSION_PORT_P] = ctx.udp_port;  // user config the udp port.
   ops_rx.pacing = ST21_PACING_NARROW;
   ops_rx.type = ST20_TYPE_FRAME_LEVEL;
@@ -251,9 +253,9 @@ int main(int argc, char** argv) {
     ops_tx.num_port = 1;
     memcpy(ops_tx.dip_addr[MTL_SESSION_PORT_P], ctx.fwd_dip_addr[MTL_PORT_P],
            MTL_IP_ADDR_LEN);
-    strncpy(ops_tx.port[MTL_SESSION_PORT_P], ctx.param.port[MTL_PORT_P],
-            MTL_PORT_MAX_LEN);
-    ops_tx.udp_port[MTL_SESSION_PORT_P] = ctx.udp_port + i;
+    snprintf(ops_tx.port[MTL_SESSION_PORT_P], MTL_PORT_MAX_LEN, "%s",
+             ctx.param.port[MTL_PORT_P]);
+    ops_tx.udp_port[MTL_SESSION_PORT_P] = ctx.udp_port + i * 2;
     ops_tx.pacing = ST21_PACING_NARROW;
     ops_tx.packing = ST20_PACKING_BPM;
     ops_tx.type = ST20_TYPE_FRAME_LEVEL;

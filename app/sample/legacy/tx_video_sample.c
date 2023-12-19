@@ -22,6 +22,9 @@ struct tv_sample_context {
   struct st_tx_frame* framebuffs;
 
   mtl_dma_mem_handle dma_mem;
+
+  struct st_frame_user_meta meta;
+  bool has_user_meta;
 };
 
 static int tx_video_next_frame(void* priv, uint16_t* next_frame_idx,
@@ -30,6 +33,7 @@ static int tx_video_next_frame(void* priv, uint16_t* next_frame_idx,
   int ret;
   uint16_t consumer_idx = s->framebuff_consumer_idx;
   struct st_tx_frame* framebuff = &s->framebuffs[consumer_idx];
+  MTL_MAY_UNUSED(meta);
 
   if (!s->handle) return -EIO; /* not ready */
 
@@ -43,6 +47,11 @@ static int tx_video_next_frame(void* priv, uint16_t* next_frame_idx,
     consumer_idx++;
     if (consumer_idx >= s->framebuff_cnt) consumer_idx = 0;
     s->framebuff_consumer_idx = consumer_idx;
+    if (s->has_user_meta) {
+      s->meta.idx = s->fb_send;
+      meta->user_meta = &s->meta;
+      meta->user_meta_size = sizeof(s->meta);
+    }
   } else {
     /* not ready */
     ret = -EIO;
@@ -58,6 +67,7 @@ static int tx_video_frame_done(void* priv, uint16_t frame_idx,
   struct tv_sample_context* s = priv;
   int ret;
   struct st_tx_frame* framebuff = &s->framebuffs[frame_idx];
+  MTL_MAY_UNUSED(meta);
 
   if (!s->handle) return -EIO; /* not ready */
 
@@ -80,6 +90,10 @@ static int tx_video_frame_done(void* priv, uint16_t frame_idx,
 
 static void tx_video_build_frame(struct tv_sample_context* s, void* frame,
                                  size_t frame_size) {
+  MTL_MAY_UNUSED(s);
+  MTL_MAY_UNUSED(frame);
+  MTL_MAY_UNUSED(frame_size);
+
   /* call the real build here, sample just sleep */
   st_usleep(10 * 1000);
 }
@@ -160,6 +174,10 @@ int main(int argc, char** argv) {
     st_pthread_mutex_init(&app[i]->wake_mutex, NULL);
     st_pthread_cond_init(&app[i]->wake_cond, NULL);
     app[i]->idx = i;
+    if (ctx.has_user_meta) {
+      snprintf(app[i]->meta.dummy, sizeof(app[i]->meta.dummy), "st20_tx_%d", i);
+      app[i]->has_user_meta = true;
+    }
     app[i]->framebuff_cnt = ctx.framebuff_cnt;
     app[i]->framebuffs =
         (struct st_tx_frame*)malloc(sizeof(*app[i]->framebuffs) * app[i]->framebuff_cnt);
@@ -179,10 +197,10 @@ int main(int argc, char** argv) {
     ops_tx.num_port = 1;
     memcpy(ops_tx.dip_addr[MTL_SESSION_PORT_P], ctx.tx_dip_addr[MTL_PORT_P],
            MTL_IP_ADDR_LEN);
-    strncpy(ops_tx.port[MTL_SESSION_PORT_P], ctx.param.port[MTL_PORT_P],
-            MTL_PORT_MAX_LEN);
+    snprintf(ops_tx.port[MTL_SESSION_PORT_P], MTL_PORT_MAX_LEN, "%s",
+             ctx.param.port[MTL_PORT_P]);
     if (ctx.ext_frame) ops_tx.flags |= ST20_TX_FLAG_EXT_FRAME;
-    ops_tx.udp_port[MTL_SESSION_PORT_P] = ctx.udp_port + i;  // udp port
+    ops_tx.udp_port[MTL_SESSION_PORT_P] = ctx.udp_port + i * 2;  // udp port
     ops_tx.pacing = ST21_PACING_NARROW;
     ops_tx.type = ST20_TYPE_FRAME_LEVEL;
     ops_tx.width = ctx.width;

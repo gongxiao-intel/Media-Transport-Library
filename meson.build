@@ -2,8 +2,7 @@
 # Copyright 2022 Intel Corporation
 
 project('mtl', 'c', default_options: ['buildtype=release'],
-  # Fallback to "more" for Windows
-  version: run_command(find_program('cat', 'more'), files('VERSION'), check: true).stdout().strip(),
+  version: run_command(find_program('cat'), files('VERSION'), check: true).stdout().strip(),
 )
 
 exec_env = host_machine.system()
@@ -14,12 +13,8 @@ message('BUILD Environment: ' + exec_env)
 add_global_arguments('-D_DEFAULT_SOURCE', language : 'c')
 
 # get external variables
-add_global_arguments('-D__MTL_GIT__="'+ run_command('git', 'describe', '--abbrev=8', '--dirty', '--always').stdout().strip() + '"', language : 'c')
+add_global_arguments('-D__MTL_GIT__="'+ run_command('git', 'describe', '--abbrev=8', '--dirty', '--always', check: false).stdout().strip() + '"', language : 'c')
 add_global_arguments('-D__MTL_LIB_BUILD__="' + meson.project_version() + '"', language : 'c')
-
-if get_option('enable_kni') == true
-  add_global_arguments('-DMTL_HAS_KNI', language : 'c')
-endif
 
 if get_option('disable_pcapng') == true
   add_global_arguments('-DMTL_DISABLE_PCAPNG', language : 'c')
@@ -63,5 +58,5 @@ pkg.generate(
   version : meson.project_version(),
   libraries : mtl_lib,
   filebase : meson.project_name(),
-  description : 'Intel® Media Transport Library based on DPDK'
+  description : 'Intel® Media Transport Library'
 )

@@ -95,14 +95,17 @@ static void st22_tx_ops_init(tests_context* st22, struct st22_tx_ops* ops) {
   ops->name = "st22_test";
   ops->priv = st22;
   ops->num_port = ctx->para.num_ports;
+  if (ctx->same_dual_port) ops->num_port = 1;
   memcpy(ops->dip_addr[MTL_SESSION_PORT_P], ctx->mcast_ip_addr[MTL_PORT_P],
          MTL_IP_ADDR_LEN);
-  strncpy(ops->port[MTL_SESSION_PORT_P], ctx->para.port[MTL_PORT_P], MTL_PORT_MAX_LEN);
+  snprintf(ops->port[MTL_SESSION_PORT_P], MTL_PORT_MAX_LEN, "%s",
+           ctx->para.port[MTL_PORT_P]);
   ops->udp_port[MTL_SESSION_PORT_P] = 10000 + st22->idx;
   if (ops->num_port > 1) {
     memcpy(ops->dip_addr[MTL_SESSION_PORT_R], ctx->mcast_ip_addr[MTL_PORT_R],
            MTL_IP_ADDR_LEN);
-    strncpy(ops->port[MTL_SESSION_PORT_R], ctx->para.port[MTL_PORT_R], MTL_PORT_MAX_LEN);
+    snprintf(ops->port[MTL_SESSION_PORT_R], MTL_PORT_MAX_LEN, "%s",
+             ctx->para.port[MTL_PORT_R]);
     ops->udp_port[MTL_SESSION_PORT_R] = 10000 + st22->idx;
   }
   ops->pacing = ST21_PACING_NARROW;
@@ -127,14 +130,17 @@ static void st22_rx_ops_init(tests_context* st22, struct st22_rx_ops* ops) {
   ops->name = "st22_test";
   ops->priv = st22;
   ops->num_port = ctx->para.num_ports;
+  if (ctx->same_dual_port) ops->num_port = 1;
   memcpy(ops->sip_addr[MTL_SESSION_PORT_P], ctx->mcast_ip_addr[MTL_PORT_P],
          MTL_IP_ADDR_LEN);
-  strncpy(ops->port[MTL_SESSION_PORT_P], ctx->para.port[MTL_PORT_P], MTL_PORT_MAX_LEN);
+  snprintf(ops->port[MTL_SESSION_PORT_P], MTL_PORT_MAX_LEN, "%s",
+           ctx->para.port[MTL_PORT_P]);
   ops->udp_port[MTL_SESSION_PORT_P] = 10000 + st22->idx;
   if (ops->num_port == 2) {
     memcpy(ops->sip_addr[MTL_SESSION_PORT_R], ctx->mcast_ip_addr[MTL_PORT_R],
            MTL_IP_ADDR_LEN);
-    strncpy(ops->port[MTL_SESSION_PORT_R], ctx->para.port[MTL_PORT_R], MTL_PORT_MAX_LEN);
+    snprintf(ops->port[MTL_SESSION_PORT_R], MTL_PORT_MAX_LEN, "%s",
+             ctx->para.port[MTL_PORT_R]);
     ops->udp_port[MTL_PORT_R] = 10000 + st22->idx;
   }
   ops->pacing = ST21_PACING_NARROW;
@@ -153,23 +159,23 @@ static void st22_rx_ops_init(tests_context* st22, struct st22_rx_ops* ops) {
 static void st22_tx_assert_cnt(int expect_s22_tx_cnt) {
   auto ctx = st_test_ctx();
   auto handle = ctx->handle;
-  struct mtl_stats stats;
+  struct st_var_info var;
   int ret;
 
-  ret = mtl_get_stats(handle, &stats);
+  ret = st_get_var_info(handle, &var);
   EXPECT_GE(ret, 0);
-  EXPECT_EQ(stats.st22_tx_sessions_cnt, expect_s22_tx_cnt);
+  EXPECT_EQ(var.st22_tx_sessions_cnt, expect_s22_tx_cnt);
 }
 
 static void st22_rx_assert_cnt(int expect_s22_rx_cnt) {
   auto ctx = st_test_ctx();
   auto handle = ctx->handle;
-  struct mtl_stats stats;
+  struct st_var_info var;
   int ret;
 
-  ret = mtl_get_stats(handle, &stats);
+  ret = st_get_var_info(handle, &var);
   EXPECT_GE(ret, 0);
-  EXPECT_EQ(stats.st22_rx_sessions_cnt, expect_s22_rx_cnt);
+  EXPECT_EQ(var.st22_rx_sessions_cnt, expect_s22_rx_cnt);
 }
 
 TEST(St22_tx, create_free_single) { create_free_test(st22_tx, 0, 1, 1); }
@@ -235,7 +241,7 @@ static int st22_tx_build_rtp_packet(tests_context* s, struct st22_rfc9134_rtp_hd
   if (s->check_sha) {
     uint8_t* payload = (uint8_t*)rtp + sizeof(*rtp);
     mtl_memcpy(payload,
-               s->frame_buf[s->fb_idx % TEST_SHA_HIST_NUM] + s->pkt_idx * data_len,
+               s->frame_buf[s->fb_idx % ST22_TEST_SHA_HIST_NUM] + s->pkt_idx * data_len,
                data_len);
   }
 
@@ -347,7 +353,7 @@ static void st22_rx_get_packet(void* args) {
 
 static void st22_rx_fps_test(enum st22_type type[], enum st_fps fps[], int width[],
                              int height[], int pkt_data_len[], int total_pkts[],
-                             int sessions = 1) {
+                             enum st_test_level level, int sessions = 1) {
   auto ctx = (struct st_tests_context*)st_test_ctx();
   auto m_handle = ctx->handle;
   int ret;
@@ -358,6 +364,9 @@ static void st22_rx_fps_test(enum st22_type type[], enum st_fps fps[], int width
          __func__);
     return;
   }
+
+  /* return if level lower than global */
+  if (level < ctx->level) return;
 
   std::vector<tests_context*> test_ctx_tx;
   std::vector<tests_context*> test_ctx_rx;
@@ -393,9 +402,9 @@ static void st22_rx_fps_test(enum st22_type type[], enum st_fps fps[], int width
     ops_tx.num_port = 1;
     memcpy(ops_tx.dip_addr[MTL_SESSION_PORT_P], ctx->para.sip_addr[MTL_PORT_R],
            MTL_IP_ADDR_LEN);
-    strncpy(ops_tx.port[MTL_SESSION_PORT_P], ctx->para.port[MTL_PORT_P],
-            MTL_PORT_MAX_LEN);
-    ops_tx.udp_port[MTL_SESSION_PORT_P] = 15000 + i;
+    snprintf(ops_tx.port[MTL_SESSION_PORT_P], MTL_PORT_MAX_LEN, "%s",
+             ctx->para.port[MTL_PORT_P]);
+    ops_tx.udp_port[MTL_SESSION_PORT_P] = 15000 + i * 2;
     ops_tx.pacing = ST21_PACING_NARROW;
     ops_tx.width = width[i];
     ops_tx.height = height[i];
@@ -447,9 +456,9 @@ static void st22_rx_fps_test(enum st22_type type[], enum st_fps fps[], int width
     ops_rx.num_port = 1;
     memcpy(ops_rx.sip_addr[MTL_SESSION_PORT_P], ctx->para.sip_addr[MTL_PORT_P],
            MTL_IP_ADDR_LEN);
-    strncpy(ops_rx.port[MTL_SESSION_PORT_P], ctx->para.port[MTL_PORT_R],
-            MTL_PORT_MAX_LEN);
-    ops_rx.udp_port[MTL_SESSION_PORT_P] = 15000 + i;
+    snprintf(ops_rx.port[MTL_SESSION_PORT_P], MTL_PORT_MAX_LEN, "%s",
+             ctx->para.port[MTL_PORT_R]);
+    ops_rx.udp_port[MTL_SESSION_PORT_P] = 15000 + i * 2;
     ops_rx.pacing = ST21_PACING_NARROW;
     ops_rx.width = width[i];
     ops_rx.height = height[i];
@@ -531,7 +540,8 @@ TEST(St22_rx, fps_1080p_s2) {
   int height[2] = {1080, 1080};
   int pkt_data_len[2] = {1280, 1280};
   int total_pkts[2] = {546, 540};
-  st22_rx_fps_test(type, fps, width, height, pkt_data_len, total_pkts, 2);
+  st22_rx_fps_test(type, fps, width, height, pkt_data_len, total_pkts,
+                   ST_TEST_LEVEL_MANDATORY, 2);
 }
 
 TEST(St22_rx, fps_mix_s2) {
@@ -541,7 +551,8 @@ TEST(St22_rx, fps_mix_s2) {
   int height[2] = {1080, 720};
   int pkt_data_len[2] = {1280, 1300};
   int total_pkts[2] = {540, 150};
-  st22_rx_fps_test(type, fps, width, height, pkt_data_len, total_pkts, 2);
+  st22_rx_fps_test(type, fps, width, height, pkt_data_len, total_pkts, ST_TEST_LEVEL_ALL,
+                   2);
 }
 
 static void st22_rx_update_src_test(int tx_sessions, enum st_test_level level) {
@@ -599,9 +610,9 @@ static void st22_rx_update_src_test(int tx_sessions, enum st_test_level level) {
     else
       memcpy(ops_tx.dip_addr[MTL_SESSION_PORT_P], ctx->para.sip_addr[MTL_PORT_R],
              MTL_IP_ADDR_LEN);
-    strncpy(ops_tx.port[MTL_SESSION_PORT_P], ctx->para.port[MTL_PORT_P],
-            MTL_PORT_MAX_LEN);
-    ops_tx.udp_port[MTL_SESSION_PORT_P] = 10000 + i;
+    snprintf(ops_tx.port[MTL_SESSION_PORT_P], MTL_PORT_MAX_LEN, "%s",
+             ctx->para.port[MTL_PORT_P]);
+    ops_tx.udp_port[MTL_SESSION_PORT_P] = 15000 + i * 2;
     ops_tx.pacing = ST21_PACING_NARROW;
     ops_tx.width = 1920;
     ops_tx.height = 1080;
@@ -647,9 +658,9 @@ static void st22_rx_update_src_test(int tx_sessions, enum st_test_level level) {
     ops_rx.num_port = 1;
     memcpy(ops_rx.sip_addr[MTL_SESSION_PORT_P], ctx->para.sip_addr[MTL_PORT_P],
            MTL_IP_ADDR_LEN);
-    strncpy(ops_rx.port[MTL_SESSION_PORT_P], ctx->para.port[MTL_PORT_R],
-            MTL_PORT_MAX_LEN);
-    ops_rx.udp_port[MTL_SESSION_PORT_P] = 10000 + i;
+    snprintf(ops_rx.port[MTL_SESSION_PORT_P], MTL_PORT_MAX_LEN, "%s",
+             ctx->para.port[MTL_PORT_R]);
+    ops_rx.udp_port[MTL_SESSION_PORT_P] = 15000 + i * 2;
     ops_rx.pacing = ST21_PACING_NARROW;
     ops_rx.width = 1920;
     ops_rx.height = 1080;
@@ -823,9 +834,9 @@ static void st22_rx_after_start_test(enum st_fps fps[], int width[], int height[
       ops_tx.num_port = 1;
       memcpy(ops_tx.dip_addr[MTL_SESSION_PORT_P], ctx->para.sip_addr[MTL_PORT_R],
              MTL_IP_ADDR_LEN);
-      strncpy(ops_tx.port[MTL_SESSION_PORT_P], ctx->para.port[MTL_PORT_P],
-              MTL_PORT_MAX_LEN);
-      ops_tx.udp_port[MTL_SESSION_PORT_P] = 15000 + i;
+      snprintf(ops_tx.port[MTL_SESSION_PORT_P], MTL_PORT_MAX_LEN, "%s",
+               ctx->para.port[MTL_PORT_P]);
+      ops_tx.udp_port[MTL_SESSION_PORT_P] = 15000 + i * 2;
       ops_tx.pacing = ST21_PACING_NARROW;
       ops_tx.width = width[i];
       ops_tx.height = height[i];
@@ -872,9 +883,9 @@ static void st22_rx_after_start_test(enum st_fps fps[], int width[], int height[
       ops_rx.num_port = 1;
       memcpy(ops_rx.sip_addr[MTL_SESSION_PORT_P], ctx->para.sip_addr[MTL_PORT_P],
              MTL_IP_ADDR_LEN);
-      strncpy(ops_rx.port[MTL_SESSION_PORT_P], ctx->para.port[MTL_PORT_R],
-              MTL_PORT_MAX_LEN);
-      ops_rx.udp_port[MTL_SESSION_PORT_P] = 15000 + i;
+      snprintf(ops_rx.port[MTL_SESSION_PORT_P], MTL_PORT_MAX_LEN, "%s",
+               ctx->para.port[MTL_PORT_R]);
+      ops_rx.udp_port[MTL_SESSION_PORT_P] = 15000 + i * 2;
       ops_rx.pacing = ST21_PACING_NARROW;
       ops_rx.width = width[i];
       ops_rx.height = height[i];
@@ -916,7 +927,7 @@ static void st22_rx_after_start_test(enum st_fps fps[], int width[], int height[
       info("%s, session %d fb_rec %d framerate %f\n", __func__, i, test_ctx_rx[i]->fb_rec,
            framerate[i]);
       EXPECT_NEAR(framerate[i], expect_framerate[i], expect_framerate[i] * 0.1);
-      EXPECT_LT(test_ctx_rx[i]->fail_cnt, 2);  // the first frame may be incompleted
+      EXPECT_LT(test_ctx_rx[i]->sha_fail_cnt, 2);  // the first frame may be incomplete
       ret = st22_rx_free(rx_handle[i]);
       EXPECT_GE(ret, 0);
     }
@@ -955,6 +966,11 @@ static void st22_rx_dump_test(enum st_fps fps[], int width[], int height[],
     return;
   }
 
+  if (!mtl_pmd_is_dpdk_based(m_handle, MTL_PORT_R)) {
+    info("%s, MTL_PORT_R is not a DPDK based PMD, skip this case\n", __func__);
+    return;
+  }
+
   std::vector<tests_context*> test_ctx_tx;
   std::vector<tests_context*> test_ctx_rx;
   std::vector<st22_tx_handle> tx_handle;
@@ -985,9 +1001,9 @@ static void st22_rx_dump_test(enum st_fps fps[], int width[], int height[],
     ops_tx.num_port = 1;
     memcpy(ops_tx.dip_addr[MTL_SESSION_PORT_P], ctx->para.sip_addr[MTL_PORT_R],
            MTL_IP_ADDR_LEN);
-    strncpy(ops_tx.port[MTL_SESSION_PORT_P], ctx->para.port[MTL_PORT_P],
-            MTL_PORT_MAX_LEN);
-    ops_tx.udp_port[MTL_SESSION_PORT_P] = 15000 + i;
+    snprintf(ops_tx.port[MTL_SESSION_PORT_P], MTL_PORT_MAX_LEN, "%s",
+             ctx->para.port[MTL_PORT_P]);
+    ops_tx.udp_port[MTL_SESSION_PORT_P] = 15000 + i * 2;
     ops_tx.pacing = ST21_PACING_NARROW;
     ops_tx.width = width[i];
     ops_tx.height = height[i];
@@ -1034,9 +1050,9 @@ static void st22_rx_dump_test(enum st_fps fps[], int width[], int height[],
     ops_rx.num_port = 1;
     memcpy(ops_rx.sip_addr[MTL_SESSION_PORT_P], ctx->para.sip_addr[MTL_PORT_P],
            MTL_IP_ADDR_LEN);
-    strncpy(ops_rx.port[MTL_SESSION_PORT_P], ctx->para.port[MTL_PORT_R],
-            MTL_PORT_MAX_LEN);
-    ops_rx.udp_port[MTL_SESSION_PORT_P] = 15000 + i;
+    snprintf(ops_rx.port[MTL_SESSION_PORT_P], MTL_PORT_MAX_LEN, "%s",
+             ctx->para.port[MTL_PORT_R]);
+    ops_rx.udp_port[MTL_SESSION_PORT_P] = 15000 + i * 2;
     ops_rx.pacing = ST21_PACING_NARROW;
     ops_rx.width = width[i];
     ops_rx.height = height[i];
@@ -1146,13 +1162,13 @@ static void st22_digest_rx_frame_check(void* args) {
       dbg("%s, frame %p\n", __func__, frame);
       int i;
       SHA256((unsigned char*)frame, ctx->frame_size, result);
-      for (i = 0; i < TEST_SHA_HIST_NUM; i++) {
+      for (i = 0; i < ST22_TEST_SHA_HIST_NUM; i++) {
         unsigned char* target_sha = ctx->shas[i];
         if (!memcmp(result, target_sha, SHA256_DIGEST_LENGTH)) break;
       }
-      if (i >= TEST_SHA_HIST_NUM) {
+      if (i >= ST22_TEST_SHA_HIST_NUM) {
         test_sha_dump("st22_rx_error_sha", result);
-        ctx->fail_cnt++;
+        ctx->sha_fail_cnt++;
       }
       ctx->check_sha_frame_cnt++;
       st22_rx_put_framebuff((st22_rx_handle)ctx->handle, frame);
@@ -1162,12 +1178,18 @@ static void st22_digest_rx_frame_check(void* args) {
 
 /* only frame level */
 static void st22_rx_digest_test(enum st_fps fps[], int width[], int height[],
-                                int pkt_data_len[], int total_pkts[], int sessions = 1) {
+                                int pkt_data_len[], int total_pkts[],
+                                enum st_test_level level, int sessions = 1,
+                                bool enable_rtcp = false) {
   auto ctx = (struct st_tests_context*)st_test_ctx();
   auto m_handle = ctx->handle;
   int ret;
   struct st22_tx_ops ops_tx;
   struct st22_rx_ops ops_rx;
+
+  /* return if level small than global */
+  if (level < ctx->level) return;
+
   if (ctx->para.num_ports != 2) {
     info("%s, dual port should be enabled for tx test, one for tx and one for rx\n",
          __func__);
@@ -1197,7 +1219,7 @@ static void st22_rx_digest_test(enum st_fps fps[], int width[], int height[],
 
     test_ctx_tx[i]->idx = i;
     test_ctx_tx[i]->ctx = ctx;
-    test_ctx_tx[i]->fb_cnt = TEST_SHA_HIST_NUM;
+    test_ctx_tx[i]->fb_cnt = ST22_TEST_SHA_HIST_NUM;
     test_ctx_tx[i]->fb_idx = 0;
 
     memset(&ops_tx, 0, sizeof(ops_tx));
@@ -1206,9 +1228,9 @@ static void st22_rx_digest_test(enum st_fps fps[], int width[], int height[],
     ops_tx.num_port = 1;
     memcpy(ops_tx.dip_addr[MTL_SESSION_PORT_P], ctx->para.sip_addr[MTL_PORT_R],
            MTL_IP_ADDR_LEN);
-    strncpy(ops_tx.port[MTL_SESSION_PORT_P], ctx->para.port[MTL_PORT_P],
-            MTL_PORT_MAX_LEN);
-    ops_tx.udp_port[MTL_SESSION_PORT_P] = 15000 + i;
+    snprintf(ops_tx.port[MTL_SESSION_PORT_P], MTL_PORT_MAX_LEN, "%s",
+             ctx->para.port[MTL_PORT_P]);
+    ops_tx.udp_port[MTL_SESSION_PORT_P] = 15000 + i * 2;
     ops_tx.pacing = ST21_PACING_NARROW;
     ops_tx.width = width[i];
     ops_tx.height = height[i];
@@ -1233,6 +1255,13 @@ static void st22_rx_digest_test(enum st_fps fps[], int width[], int height[],
     ops_tx.rtp_frame_total_pkts = test_ctx_tx[i]->total_pkts_in_frame;
     ops_tx.notify_frame_done = st22_frame_done;
     ops_tx.get_next_frame = st22_next_video_frame;
+    struct st_tx_rtcp_ops ops_tx_rtcp;
+    memset(&ops_tx_rtcp, 0, sizeof(ops_tx_rtcp));
+    if (enable_rtcp) {
+      ops_tx.flags |= ST22_TX_FLAG_ENABLE_RTCP;
+      ops_tx_rtcp.rtcp_buffer_size = 512;
+      ops_tx.rtcp = &ops_tx_rtcp;
+    }
 
     tx_handle[i] = st22_tx_create(m_handle, &ops_tx);
     ASSERT_TRUE(tx_handle[i] != NULL);
@@ -1240,7 +1269,7 @@ static void st22_rx_digest_test(enum st_fps fps[], int width[], int height[],
     /* sha calculate */
     size_t frame_size = test_ctx_tx[i]->frame_size;
     uint8_t* fb;
-    for (int frame = 0; frame < TEST_SHA_HIST_NUM; frame++) {
+    for (int frame = 0; frame < ST22_TEST_SHA_HIST_NUM; frame++) {
       fb = (uint8_t*)st22_tx_get_fb_addr(tx_handle[i], frame);
       ASSERT_TRUE(fb != NULL);
       st_test_rand_data(fb, frame_size, frame);
@@ -1258,7 +1287,7 @@ static void st22_rx_digest_test(enum st_fps fps[], int width[], int height[],
 
     test_ctx_rx[i]->idx = i;
     test_ctx_rx[i]->ctx = ctx;
-    test_ctx_rx[i]->fb_cnt = TEST_SHA_HIST_NUM;
+    test_ctx_rx[i]->fb_cnt = ST22_TEST_SHA_HIST_NUM;
     test_ctx_rx[i]->fb_idx = 0;
 
     memset(&ops_rx, 0, sizeof(ops_rx));
@@ -1267,9 +1296,9 @@ static void st22_rx_digest_test(enum st_fps fps[], int width[], int height[],
     ops_rx.num_port = 1;
     memcpy(ops_rx.sip_addr[MTL_SESSION_PORT_P], ctx->para.sip_addr[MTL_PORT_P],
            MTL_IP_ADDR_LEN);
-    strncpy(ops_rx.port[MTL_SESSION_PORT_P], ctx->para.port[MTL_PORT_R],
-            MTL_PORT_MAX_LEN);
-    ops_rx.udp_port[MTL_SESSION_PORT_P] = 15000 + i;
+    snprintf(ops_rx.port[MTL_SESSION_PORT_P], MTL_PORT_MAX_LEN, "%s",
+             ctx->para.port[MTL_PORT_R]);
+    ops_rx.udp_port[MTL_SESSION_PORT_P] = 15000 + i * 2;
     ops_rx.pacing = ST21_PACING_NARROW;
     ops_rx.width = width[i];
     ops_rx.height = height[i];
@@ -1277,6 +1306,16 @@ static void st22_rx_digest_test(enum st_fps fps[], int width[], int height[],
     ops_rx.payload_type = ST22_TEST_PAYLOAD_TYPE;
     ops_rx.type = ST22_TYPE_FRAME_LEVEL;
     ops_rx.framebuff_cnt = test_ctx_rx[i]->fb_cnt;
+    struct st_rx_rtcp_ops ops_rx_rtcp;
+    memset(&ops_rx_rtcp, 0, sizeof(ops_rx_rtcp));
+    if (enable_rtcp) {
+      ops_rx.flags |= ST22_RX_FLAG_ENABLE_RTCP | ST22_RX_FLAG_SIMULATE_PKT_LOSS;
+      ops_rx_rtcp.nack_interval_us = 100;
+      ops_rx_rtcp.seq_skip_window = 0;
+      ops_rx_rtcp.burst_loss_max = 4;
+      ops_rx_rtcp.sim_loss_rate = 0.0001;
+      ops_rx.rtcp = &ops_rx_rtcp;
+    }
 
     ops_rx.notify_rtp_ready = st22_rx_rtp_ready;
     ops_rx.rtp_ring_size = 1024;
@@ -1296,7 +1335,7 @@ static void st22_rx_digest_test(enum st_fps fps[], int width[], int height[],
 
     /* copy sha from tx */
     memcpy(test_ctx_rx[i]->shas, test_ctx_tx[i]->shas,
-           TEST_SHA_HIST_NUM * SHA256_DIGEST_LENGTH);
+           ST22_TEST_SHA_HIST_NUM * SHA256_DIGEST_LENGTH);
 
     test_ctx_rx[i]->stop = false;
     sha_check[i] = std::thread(st22_digest_rx_frame_check, test_ctx_rx[i]);
@@ -1329,7 +1368,7 @@ static void st22_rx_digest_test(enum st_fps fps[], int width[], int height[],
     info("%s, session %d fb_rec %d framerate %f\n", __func__, i, test_ctx_rx[i]->fb_rec,
          framerate[i]);
     EXPECT_NEAR(framerate[i], expect_framerate[i], expect_framerate[i] * 0.1);
-    EXPECT_EQ(test_ctx_rx[i]->fail_cnt, 0);
+    EXPECT_EQ(test_ctx_rx[i]->sha_fail_cnt, 0);
     EXPECT_EQ(test_ctx_rx[i]->incomplete_frame_cnt, 0);
     ret = st22_tx_free(tx_handle[i]);
     EXPECT_GE(ret, 0);
@@ -1346,7 +1385,18 @@ TEST(St22_rx, digest_s2) {
   int height[2] = {1080, 1080};
   int pkt_data_len[2] = {1280, 1280};
   int total_pkts[2] = {551, 1520};
-  st22_rx_digest_test(fps, width, height, pkt_data_len, total_pkts, 2);
+  st22_rx_digest_test(fps, width, height, pkt_data_len, total_pkts,
+                      ST_TEST_LEVEL_MANDATORY, 2);
+}
+
+TEST(St22_rx, digest_rtcp_s2) {
+  enum st_fps fps[2] = {ST_FPS_P59_94, ST_FPS_P50};
+  int width[2] = {1920, 1920};
+  int height[2] = {1080, 1080};
+  int pkt_data_len[2] = {1280, 1280};
+  int total_pkts[2] = {551, 1520};
+  st22_rx_digest_test(fps, width, height, pkt_data_len, total_pkts, ST_TEST_LEVEL_ALL, 2,
+                      true);
 }
 
 static void st22_tx_user_pacing_test(int width[], int height[], int pkt_data_len[],
@@ -1401,9 +1451,9 @@ static void st22_tx_user_pacing_test(int width[], int height[], int pkt_data_len
     ops_tx.num_port = 1;
     memcpy(ops_tx.dip_addr[MTL_SESSION_PORT_P], ctx->para.sip_addr[MTL_PORT_R],
            MTL_IP_ADDR_LEN);
-    strncpy(ops_tx.port[MTL_SESSION_PORT_P], ctx->para.port[MTL_PORT_P],
-            MTL_PORT_MAX_LEN);
-    ops_tx.udp_port[MTL_SESSION_PORT_P] = 15000 + i;
+    snprintf(ops_tx.port[MTL_SESSION_PORT_P], MTL_PORT_MAX_LEN, "%s",
+             ctx->para.port[MTL_PORT_P]);
+    ops_tx.udp_port[MTL_SESSION_PORT_P] = 15000 + i * 2;
     ops_tx.pacing = ST21_PACING_NARROW;
     ops_tx.width = width[i];
     ops_tx.height = height[i];
@@ -1446,9 +1496,9 @@ static void st22_tx_user_pacing_test(int width[], int height[], int pkt_data_len
     ops_rx.num_port = 1;
     memcpy(ops_rx.sip_addr[MTL_SESSION_PORT_P], ctx->para.sip_addr[MTL_PORT_P],
            MTL_IP_ADDR_LEN);
-    strncpy(ops_rx.port[MTL_SESSION_PORT_P], ctx->para.port[MTL_PORT_R],
-            MTL_PORT_MAX_LEN);
-    ops_rx.udp_port[MTL_SESSION_PORT_P] = 15000 + i;
+    snprintf(ops_rx.port[MTL_SESSION_PORT_P], MTL_PORT_MAX_LEN, "%s",
+             ctx->para.port[MTL_PORT_R]);
+    ops_rx.udp_port[MTL_SESSION_PORT_P] = 15000 + i * 2;
     ops_rx.pacing = ST21_PACING_NARROW;
     ops_rx.width = width[i];
     ops_rx.height = height[i];

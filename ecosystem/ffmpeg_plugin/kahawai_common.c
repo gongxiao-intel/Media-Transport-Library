@@ -38,21 +38,33 @@ mtl_handle kahawai_init(char* port, char* local_addr, int enc_session_cnt,
                         int dec_session_cnt, char* dma_dev) {
   param.num_ports = 1;
 
-  strncpy(param.port[MTL_PORT_P], port, MTL_PORT_MAX_LEN);
+  snprintf(param.port[MTL_PORT_P], MTL_PORT_MAX_LEN, "%s", port);
+  param.pmd[MTL_PORT_P] = mtl_pmd_by_port_name(param.port[MTL_PORT_P]);
 
-  if (NULL == local_addr) {
-    av_log(NULL, AV_LOG_ERROR, "Invalid local IP address\n");
-    return NULL;
-  } else if (sscanf(local_addr, "%hhu.%hhu.%hhu.%hhu", &param.sip_addr[MTL_PORT_P][0],
-                    &param.sip_addr[MTL_PORT_P][1], &param.sip_addr[MTL_PORT_P][2],
-                    &param.sip_addr[MTL_PORT_P][3]) != MTL_IP_ADDR_LEN) {
-    av_log(NULL, AV_LOG_ERROR, "Failed to parse local IP address: %s\n", local_addr);
-    return NULL;
+  if (param.pmd[MTL_PORT_P] == MTL_PMD_DPDK_USER) {
+    /* check ip for dpdk based pmd */
+    if (NULL == local_addr) {
+      av_log(NULL, AV_LOG_ERROR, "Invalid local IP address\n");
+      return NULL;
+    } else if (sscanf(local_addr, "%hhu.%hhu.%hhu.%hhu", &param.sip_addr[MTL_PORT_P][0],
+                      &param.sip_addr[MTL_PORT_P][1], &param.sip_addr[MTL_PORT_P][2],
+                      &param.sip_addr[MTL_PORT_P][3]) != MTL_IP_ADDR_LEN) {
+      av_log(NULL, AV_LOG_ERROR, "Failed to parse local IP address: %s\n", local_addr);
+      return NULL;
+    }
   }
 
-  if (enc_session_cnt > 0) param.tx_queues_cnt[MTL_PORT_P] = enc_session_cnt;
-  if (dec_session_cnt > 0) param.rx_queues_cnt[MTL_PORT_P] = dec_session_cnt;
-  param.flags = MTL_FLAG_BIND_NUMA | MTL_FLAG_DEV_AUTO_START_STOP;
+  if (enc_session_cnt > 0) {
+    param.tx_queues_cnt[MTL_PORT_P] = enc_session_cnt;
+    param.flags |= MTL_FLAG_TX_VIDEO_MIGRATE;
+  }
+  if (dec_session_cnt > 0) {
+    param.rx_queues_cnt[MTL_PORT_P] = dec_session_cnt;
+    param.flags |= MTL_FLAG_RX_VIDEO_MIGRATE;
+    param.flags |= MTL_FLAG_RX_SEPARATE_VIDEO_LCORE;
+  }
+  param.flags |= MTL_FLAG_BIND_NUMA;
+  param.flags |= MTL_FLAG_DEV_AUTO_START_STOP;
   param.log_level = MTL_LOG_LEVEL_DEBUG;  // log level. ERROR, INFO, WARNING
   param.priv = NULL;                      // usr crx pointer
   param.ptp_get_time_fn = NULL;
@@ -60,7 +72,7 @@ mtl_handle kahawai_init(char* port, char* local_addr, int enc_session_cnt,
 
   if (dma_dev) {
     param.num_dma_dev_port = 1;
-    strncpy(param.dma_dev_port[0], dma_dev, MTL_PORT_MAX_LEN);
+    snprintf(param.dma_dev_port[MTL_PORT_P], MTL_PORT_MAX_LEN, "%s", dma_dev);
     av_log(NULL, AV_LOG_VERBOSE, "DMA enabled on %s\n", dma_dev);
   }
 

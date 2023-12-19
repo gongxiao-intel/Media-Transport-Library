@@ -43,6 +43,8 @@ static int rx_video_enqueue_frame(struct rv_slice_sample_ctx* s, void* frame,
 static int rx_video_slice_ready(void* priv, void* frame,
                                 struct st20_rx_slice_meta* meta) {
   struct rv_slice_sample_ctx* s = (struct rv_slice_sample_ctx*)priv;
+  MTL_MAY_UNUSED(frame);
+  MTL_MAY_UNUSED(meta);
 
   if (!s->handle) return -EIO;
 
@@ -82,6 +84,8 @@ static int rx_video_frame_ready(void* priv, void* frame,
 
 static void rx_video_consume_frame(struct rv_slice_sample_ctx* s, void* frame,
                                    size_t frame_size) {
+  MTL_MAY_UNUSED(frame);
+  MTL_MAY_UNUSED(frame_size);
   dbg("%s(%d), frame %p\n", __func__, s->idx, frame);
 
   /* call the real consumer here, sample just sleep */
@@ -175,9 +179,10 @@ int main(int argc, char** argv) {
     ops_rx.num_port = 1;
     memcpy(ops_rx.sip_addr[MTL_SESSION_PORT_P], ctx.rx_sip_addr[MTL_PORT_P],
            MTL_IP_ADDR_LEN);
-    strncpy(ops_rx.port[MTL_SESSION_PORT_P], ctx.param.port[MTL_PORT_P],
-            MTL_PORT_MAX_LEN);
-    ops_rx.udp_port[MTL_SESSION_PORT_P] = ctx.udp_port + i;  // user config the udp port.
+    snprintf(ops_rx.port[MTL_SESSION_PORT_P], MTL_PORT_MAX_LEN, "%s",
+             ctx.param.port[MTL_PORT_P]);
+    ops_rx.udp_port[MTL_SESSION_PORT_P] =
+        ctx.udp_port + i * 2;  // user config the udp port.
     ops_rx.pacing = ST21_PACING_NARROW;
     ops_rx.type = ST20_TYPE_SLICE_LEVEL;
     ops_rx.width = ctx.width;

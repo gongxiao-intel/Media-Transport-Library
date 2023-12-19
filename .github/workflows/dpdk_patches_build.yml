@@ -2,23 +2,39 @@ name: DPDK patches build
 
 on:
   push:
-    paths:
-      - 'patches/dpdk/**'
-      - .github/workflows/dpdk_patches_build.yml
+    branches:
+      - main
+      - 'maint-**'
   pull_request:
-    paths:
-      - 'patches/dpdk/**'
-      - .github/workflows/dpdk_patches_build.yml
+    branches:
+      - main
+      - 'maint-**'
 
 env:
   # Customize the env if
-  DPDK_VERSION: 23.03
+  DPDK_VERSION: 23.11
 
 permissions:
   contents: read
 
 jobs:
+  changes:
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+    outputs:
+      changed: ${{ steps.filter.outputs.dpdk_patches == 'true' }}
+    steps:
+      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+
+      - uses: dorny/paths-filter@4512585405083f25c027a35db413c2b3b9006d50 # v2
+        id: filter
+        with:
+          filters: .github/path_filters.yml
+
   build:
+    needs: changes
+    if: ${{ github.repository == 'OpenVisualCloud/Media-Transport-Library' && needs.changes.outputs.changed == 'true' }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     container:
@@ -28,52 +44,52 @@ jobs:
         os: [ubuntu-latest]
 
     steps:
-    - name: Harden Runner
-      uses: step-security/harden-runner@55d479fb1c5bcad5a4f9099a5d9f37c8857b2845 # v2.4.1
-      with:
-        egress-policy: audit
+      - name: Harden Runner
+        uses: step-security/harden-runner@eb238b55efaa70779f274895e782ed17c84f2895 # v2.6.1
+        with:
+          egress-policy: audit
 
-    - name: Update to latest git
-      run: |
-        apt-get update -y
-        apt-get install -y git
+      - name: Update to latest git
+        run: |
+          apt-get update -y
+          apt-get install -y git
 
-    - name: checkout kahawai repo
-      uses: actions/checkout@c85c95e3d7251135ab7dc9ce3241c5835cc595a9 # v3.5.3
+      - name: checkout kahawai repo
+        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
 
-    - name: checkout dpdk repo
-      uses: actions/checkout@c85c95e3d7251135ab7dc9ce3241c5835cc595a9 # v3.5.3
-      with:
-        repository: 'DPDK/dpdk'
-        ref: v${{  env.DPDK_VERSION  }}
-        path: dpdk
+      - name: checkout dpdk repo
+        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+        with:
+          repository: 'DPDK/dpdk'
+          ref: v${{  env.DPDK_VERSION  }}
+          path: dpdk
 
-    - name: Install the build dependency
-      run: |
-        apt-get update -y
-        apt-get install -y sudo git gcc meson python3 python3-pip pkg-config libnuma-dev libjson-c-dev libpcap-dev libgtest-dev libsdl2-dev libsdl2-ttf-dev libssl-dev 
+      - name: Install the build dependency
+        run: |
+          apt-get update -y
+          apt-get install -y sudo git gcc meson python3 python3-pip pkg-config libnuma-dev libjson-c-dev libpcap-dev libgtest-dev libsdl2-dev libsdl2-ttf-dev libssl-dev
 
-    - name: Install the python package
-      run: pip install pyelftools==0.29 ninja==1.11.1
+      - name: Install the python package
+        run: pip install pyelftools==0.29 ninja==1.11.1
 
-    - name: Git config
-      run: |
-        git config --global user.email "you@example.com"
-        git config --global user.name "Your Name"
+      - name: Git config
+        run: |
+          git config --global user.email "you@example.com"
+          git config --global user.name "Your Name"
 
-    - name: Apply dpdk patches
-      run: |
-        cd dpdk
-        git am ../patches/dpdk/${{  env.DPDK_VERSION  }}/*.patch
+      - name: Apply dpdk patches
+        run: |
+          cd dpdk
+          git am ../patches/dpdk/${{  env.DPDK_VERSION  }}/*.patch
 
-    - name: Build dpdk
-      run: |
-        cd dpdk
-        meson build
-        ninja -C build
-        cd build
-        sudo ninja install
+      - name: Build dpdk
+        run: |
+          cd dpdk
+          meson build
+          ninja -C build
+          cd build
+          sudo ninja install
 
-    - name: Build
-      run: |
-        ./build.sh
+      - name: Build
+        run: |
+          ./build.sh

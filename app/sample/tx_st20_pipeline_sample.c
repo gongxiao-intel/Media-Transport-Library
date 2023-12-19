@@ -22,6 +22,9 @@ struct tx_st20p_sample_ctx {
   mtl_iova_t source_begin_iova;
   uint8_t* source_end;
   uint8_t* frame_cursor;
+
+  struct st_frame_user_meta meta;
+  bool has_user_meta;
 };
 
 static int tx_st20p_close_source(struct tx_st20p_sample_ctx* s) {
@@ -46,7 +49,11 @@ static int tx_st20p_open_source(struct tx_st20p_sample_ctx* s, char* file) {
     goto init_fb;
   }
 
-  fstat(fd, &i);
+  if (fstat(fd, &i) < 0) {
+    err("%s, fstat %s fail\n", __func__, file);
+    close(fd);
+    return -EIO;
+  }
   if (i.st_size < s->frame_size) {
     err("%s, %s file size small then a frame %" PRIu64 "\n", __func__, file,
         s->frame_size);
@@ -73,13 +80,15 @@ init_fb:
   s->source_begin = mtl_hp_zmalloc(s->st, fbs_size, MTL_PORT_P);
   if (!s->source_begin) {
     err("%s, source malloc on hugepage fail\n", __func__);
-    close(fd);
+    if (m) munmap(m, i.st_size);
+    if (fd >= 0) close(fd);
     return -EIO;
   }
   s->frame_cursor = s->source_begin;
   if (m) mtl_memcpy(s->source_begin, m, fbs_size);
   s->source_end = s->source_begin + fbs_size;
 
+  if (m) munmap(m, i.st_size);
   if (fd >= 0) close(fd);
 
   return 0;
@@ -97,6 +106,8 @@ static int tx_st20p_frame_available(void* priv) {
 
 static int tx_st20p_frame_done(void* priv, struct st_frame* frame) {
   struct tx_st20p_sample_ctx* s = priv;
+  MTL_MAY_UNUSED(frame);
+
   s->fb_send_done++;
   dbg("%s(%d), done %d\n", __func__, s->idx, s->fb_send_done);
   return 0;
@@ -124,6 +135,11 @@ static void* tx_st20p_frame_thread(void* arg) {
     }
 
     if (s->source_begin) tx_st20p_build_frame(s, frame);
+    if (s->has_user_meta) {
+      s->meta.idx = s->fb_send;
+      frame->user_meta = &s->meta;
+      frame->user_meta_size = sizeof(s->meta);
+    }
     st20p_tx_put_frame(handle, frame);
 
     /* point to next frame */
@@ -169,6 +185,10 @@ int main(int argc, char** argv) {
     app[i]->st = ctx.st;
     app[i]->idx = i;
     app[i]->stop = false;
+    if (ctx.has_user_meta) {
+      snprintf(app[i]->meta.dummy, sizeof(app[i]->meta.dummy), "st20p_tx_%d", i);
+      app[i]->has_user_meta = true;
+    }
     st_pthread_mutex_init(&app[i]->wake_mutex, NULL);
     st_pthread_cond_init(&app[i]->wake_cond, NULL);
 
@@ -179,15 +199,15 @@ int main(int argc, char** argv) {
     ops_tx.port.num_port = ctx.param.num_ports;
     memcpy(ops_tx.port.dip_addr[MTL_SESSION_PORT_P], ctx.tx_dip_addr[MTL_PORT_P],
            MTL_IP_ADDR_LEN);
-    strncpy(ops_tx.port.port[MTL_SESSION_PORT_P], ctx.param.port[MTL_PORT_P],
-            MTL_PORT_MAX_LEN);
-    ops_tx.port.udp_port[MTL_SESSION_PORT_P] = ctx.udp_port + i;
+    snprintf(ops_tx.port.port[MTL_SESSION_PORT_P], MTL_PORT_MAX_LEN, "%s",
+             ctx.param.port[MTL_PORT_P]);
+    ops_tx.port.udp_port[MTL_SESSION_PORT_P] = ctx.udp_port + i * 2;
     if (ops_tx.port.num_port > 1) {
       memcpy(ops_tx.port.dip_addr[MTL_SESSION_PORT_R], ctx.tx_dip_addr[MTL_PORT_R],
              MTL_IP_ADDR_LEN);
-      strncpy(ops_tx.port.port[MTL_SESSION_PORT_R], ctx.param.port[MTL_PORT_R],
-              MTL_PORT_MAX_LEN);
-      ops_tx.port.udp_port[MTL_SESSION_PORT_R] = ctx.udp_port + i;
+      snprintf(ops_tx.port.port[MTL_SESSION_PORT_R], MTL_PORT_MAX_LEN, "%s",
+               ctx.param.port[MTL_PORT_R]);
+      ops_tx.port.udp_port[MTL_SESSION_PORT_R] = ctx.udp_port + i * 2;
     }
     ops_tx.port.payload_type = ctx.payload_type;
     ops_tx.width = ctx.width;
@@ -210,6 +230,7 @@ int main(int argc, char** argv) {
     app[i]->handle = tx_handle;
 
     app[i]->frame_size = st20p_tx_frame_size(tx_handle);
+    info("%s(%d), frame_size %" PRId64 "\n", __func__, i, app[i]->frame_size);
     ret = tx_st20p_open_source(app[i], ctx.tx_url);
     if (ret < 0) {
       err("%s(%d), open source fail\n", __func__, i);

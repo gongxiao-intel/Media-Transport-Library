@@ -95,6 +95,7 @@ struct st_tests_context {
   bool dhcp;
   enum mtl_iova_mode iova;
   enum mtl_rss_mode rss_mode;
+  bool same_dual_port;
 
   st22_encoder_dev_handle encoder_dev_handle;
   st22_decoder_dev_handle decoder_dev_handle;
@@ -191,11 +192,16 @@ class tests_context {
   uint8_t* frame_buf[TEST_MAX_SHA_HIST_NUM] = {};
   uint16_t lines_ready[TEST_MAX_SHA_HIST_NUM] = {};
   bool check_sha = false;
-  int fail_cnt = 0; /* fail as sha or wrong status, etc. */
+  int sha_fail_cnt = 0; /* fail as sha check fail */
+  int tx_tmstamp_delta_fail_cnt = 0;
+  int rx_meta_fail_cnt = 0;
+  int rx_field_fail_cnt = 0;
   int incomplete_frame_cnt = 0;
   int meta_timing_fail_cnt = 0;
   int incomplete_slice_cnt = 0;
   int check_sha_frame_cnt = 0;
+  int last_user_meta_frame_idx = 0;
+  int user_meta_fail_cnt = 0;
   bool out_of_order_pkt = false; /* out of order pkt index */
   int* ooo_mapping = NULL;
   int slice_cnt = 0;
@@ -210,7 +216,6 @@ class tests_context {
   int ext_idx = 0;
   bool ext_fb_in_use[3] = {false}; /* assume 3 framebuffer */
   mtl_dma_mem_handle dma_mem = NULL;
-  bool rx_get_ext = false;
 
   bool user_pacing = false;
   /* user timestamp which advanced by 1 for every frame */
@@ -218,6 +223,15 @@ class tests_context {
   uint32_t pre_timestamp = 0;
   double frame_time = 0; /* in ns */
   uint64_t ptp_time_first_frame = 0;
+  bool user_meta = false;
+};
+
+#define TEST_USER_META_MAGIC ST_PLUGIN_MAGIC('U', 'S', 'M', 'T')
+
+struct test_user_meta {
+  uint32_t magic;
+  int session_idx;
+  int frame_idx;
 };
 
 int tests_context_unit(tests_context* ctx);

@@ -24,6 +24,8 @@ enum st_args_cmd {
   ST_ARG_R_NETMASK,
   ST_ARG_P_GATEWAY,
   ST_ARG_R_GATEWAY,
+  ST_ARG_P_RX_MCAST_SIP,
+  ST_ARG_R_RX_MCAST_SIP,
 
   ST_ARG_TX_VIDEO_URL = 0x200,
   ST_ARG_TX_VIDEO_SESSIONS_CNT,
@@ -50,12 +52,16 @@ enum st_args_cmd {
   ST_ARG_PAD_INTERVAL,
   ST_ARG_NO_PAD_STATIC,
   ST_ARG_SHAPING,
+  ST_ARG_TIMESTAMP_FIRST_PKT,
+  ST_ARG_TIMESTAMP_EPOCH,
+  ST_ARG_TIMESTAMP_DELTA_US,
+  ST_ARG_NO_BULK,
 
   ST_ARG_CONFIG_FILE = 0x300,
   ST_ARG_TEST_TIME,
   ST_ARG_PTP_UNICAST_ADDR,
   ST_ARG_CNI_THREAD,
-  ST_ARG_RX_EBU,
+  ST_ARG_RX_TIMING_PARSER,
   ST_ARG_USER_LCORES,
   ST_ARG_SCH_DATA_QUOTA,
   ST_ARG_SCH_SESSION_QUOTA,
@@ -63,11 +69,15 @@ enum st_args_cmd {
   ST_ARG_R_TX_DST_MAC,
   ST_ARG_NIC_RX_PROMISCUOUS,
   ST_ARG_LIB_PTP,
+  ST_ARG_LIB_PHC2SYS,
+  ST_ARG_LIB_PTP_SYNC_SYS,
   ST_ARG_RX_MONO_POOL,
   ST_ARG_TX_MONO_POOL,
   ST_ARG_MONO_POOL,
   ST_ARG_RX_POOL_DATA_SIZE,
   ST_ARG_LOG_LEVEL,
+  ST_ARG_LOG_FILE,
+  ST_ARG_LOG_TIME_MS,
   ST_ARG_NB_TX_DESC,
   ST_ARG_NB_RX_DESC,
   ST_ARG_DMA_DEV,
@@ -105,6 +115,12 @@ enum st_args_cmd {
   ST_ARG_IOVA_MODE,
   ST_ARG_SHARED_TX_QUEUES,
   ST_ARG_SHARED_RX_QUEUES,
+  ST_ARG_RX_USE_CNI,
+  ST_ARG_RX_UDP_PORT_ONLY,
+  ST_ARG_VIRTIO_USER,
+  ST_ARG_VIDEO_SHA_CHECK,
+  ST_ARG_ARP_TIMEOUT_S,
+  ST_ARG_RSS_SCH_NB,
   ST_ARG_MAX,
 };
 
@@ -129,6 +145,8 @@ static struct option st_app_args_options[] = {
     {"r_netmask", required_argument, 0, ST_ARG_R_NETMASK},
     {"p_gateway", required_argument, 0, ST_ARG_P_GATEWAY},
     {"r_gateway", required_argument, 0, ST_ARG_R_GATEWAY},
+    {"p_rx_mcast_sip", required_argument, 0, ST_ARG_P_RX_MCAST_SIP},
+    {"r_rx_mcast_sip", required_argument, 0, ST_ARG_R_RX_MCAST_SIP},
 
     {"tx_video_url", required_argument, 0, ST_ARG_TX_VIDEO_URL},
     {"tx_video_sessions_count", required_argument, 0, ST_ARG_TX_VIDEO_SESSIONS_CNT},
@@ -156,12 +174,15 @@ static struct option st_app_args_options[] = {
     {"pad_interval", required_argument, 0, ST_ARG_PAD_INTERVAL},
     {"no_static_pad", no_argument, 0, ST_ARG_NO_PAD_STATIC},
     {"shaping", required_argument, 0, ST_ARG_SHAPING},
+    {"ts_first_pkt", no_argument, 0, ST_ARG_TIMESTAMP_FIRST_PKT},
+    {"ts_delta_us", required_argument, 0, ST_ARG_TIMESTAMP_DELTA_US},
+    {"no_bulk", no_argument, 0, ST_ARG_NO_BULK},
 
     {"config_file", required_argument, 0, ST_ARG_CONFIG_FILE},
     {"test_time", required_argument, 0, ST_ARG_TEST_TIME},
     {"ptp_unicast", no_argument, 0, ST_ARG_PTP_UNICAST_ADDR},
     {"cni_thread", no_argument, 0, ST_ARG_CNI_THREAD},
-    {"ebu", no_argument, 0, ST_ARG_RX_EBU},
+    {"rx_timing_parser", no_argument, 0, ST_ARG_RX_TIMING_PARSER},
     {"lcores", required_argument, 0, ST_ARG_USER_LCORES},
     {"sch_data_quota", required_argument, 0, ST_ARG_SCH_DATA_QUOTA},
     {"sch_session_quota", required_argument, 0, ST_ARG_SCH_SESSION_QUOTA},
@@ -169,7 +190,11 @@ static struct option st_app_args_options[] = {
     {"r_tx_dst_mac", required_argument, 0, ST_ARG_R_TX_DST_MAC},
     {"promiscuous", no_argument, 0, ST_ARG_NIC_RX_PROMISCUOUS},
     {"log_level", required_argument, 0, ST_ARG_LOG_LEVEL},
+    {"log_file", required_argument, 0, ST_ARG_LOG_FILE},
+    {"log_time_ms", no_argument, 0, ST_ARG_LOG_TIME_MS},
     {"ptp", no_argument, 0, ST_ARG_LIB_PTP},
+    {"phc2sys", no_argument, 0, ST_ARG_LIB_PHC2SYS},
+    {"ptp_sync_sys", no_argument, 0, ST_ARG_LIB_PTP_SYNC_SYS},
     {"rx_mono_pool", no_argument, 0, ST_ARG_RX_MONO_POOL},
     {"tx_mono_pool", no_argument, 0, ST_ARG_TX_MONO_POOL},
     {"mono_pool", no_argument, 0, ST_ARG_MONO_POOL},
@@ -211,6 +236,12 @@ static struct option st_app_args_options[] = {
     {"iova_mode", required_argument, 0, ST_ARG_IOVA_MODE},
     {"shared_tx_queues", no_argument, 0, ST_ARG_SHARED_TX_QUEUES},
     {"shared_rx_queues", no_argument, 0, ST_ARG_SHARED_RX_QUEUES},
+    {"rx_use_cni", no_argument, 0, ST_ARG_RX_USE_CNI},
+    {"rx_udp_port_only", no_argument, 0, ST_ARG_RX_UDP_PORT_ONLY},
+    {"virtio_user", no_argument, 0, ST_ARG_VIRTIO_USER},
+    {"video_sha_check", no_argument, 0, ST_ARG_VIDEO_SHA_CHECK},
+    {"arp_timeout_s", required_argument, 0, ST_ARG_ARP_TIMEOUT_S},
+    {"rss_sch_nb", required_argument, 0, ST_ARG_RSS_SCH_NB},
 
 
     {0, 0, 0, 0}};
@@ -243,13 +274,13 @@ static int app_args_parse_tx_mac(struct st_app_context* ctx, char* mac_str,
 static int app_args_dma_dev(struct mtl_init_params* p, char* in_dev) {
   if (!in_dev) return -EIO;
   char devs[128] = {0};
-  strncpy(devs, in_dev, 128 - 1);
+  snprintf(devs, 128 - 1, "%s", in_dev);
 
   dbg("%s, dev list %s\n", __func__, devs);
   char* next_dev = strtok(devs, ",");
   while (next_dev && (p->num_dma_dev_port < MTL_DMA_DEV_MAX)) {
     dbg("next_dev: %s\n", next_dev);
-    strncpy(p->dma_dev_port[p->num_dma_dev_port], next_dev, MTL_PORT_MAX_LEN - 1);
+    snprintf(p->dma_dev_port[p->num_dma_dev_port], MTL_PORT_MAX_LEN - 1, "%s", next_dev);
     p->num_dma_dev_port++;
     next_dev = strtok(NULL, ",");
   }
@@ -305,8 +336,21 @@ static int app_args_json(struct st_app_context* ctx, struct mtl_init_params* p,
   if (ctx->json_ctx->shared_rx_queues) p->flags |= MTL_FLAG_SHARED_RX_QUEUE;
   if (ctx->json_ctx->tx_no_chain) p->flags |= MTL_FLAG_TX_NO_CHAIN;
   if (ctx->json_ctx->rss_mode) p->rss_mode = ctx->json_ctx->rss_mode;
+  if (ctx->json_ctx->log_file) st_set_mtl_log_file(ctx, ctx->json_ctx->log_file);
 
+  info("%s, json_file %s succ\n", __func__, json_file);
   return 0;
+}
+
+static void log_prefix_time_ms(char* buf, size_t sz) {
+  struct timespec ts;
+  struct tm tm;
+  char time_s_buf[64];
+
+  clock_gettime(CLOCK_REALTIME, &ts);
+  localtime_r(&ts.tv_sec, &tm);
+  strftime(time_s_buf, sizeof(time_s_buf), "%Y-%m-%d %H:%M:%S", &tm);
+  snprintf(buf, sz, "%s.%u, ", time_s_buf, (uint32_t)(ts.tv_nsec / NS_PER_MS));
 }
 
 int st_app_parse_args(struct st_app_context* ctx, struct mtl_init_params* p, int argc,
@@ -357,6 +401,12 @@ int st_app_parse_args(struct st_app_context* ctx, struct mtl_init_params* p, int
         break;
       case ST_ARG_R_GATEWAY:
         inet_pton(AF_INET, optarg, p->gateway[MTL_PORT_R]);
+        break;
+      case ST_ARG_P_RX_MCAST_SIP:
+        inet_pton(AF_INET, optarg, ctx->rx_mcast_sip_addr[MTL_PORT_P]);
+        break;
+      case ST_ARG_R_RX_MCAST_SIP:
+        inet_pton(AF_INET, optarg, ctx->rx_mcast_sip_addr[MTL_PORT_R]);
         break;
       case ST_ARG_TX_VIDEO_URL:
         snprintf(ctx->tx_video_url, sizeof(ctx->tx_video_url), "%s", optarg);
@@ -445,6 +495,18 @@ int st_app_parse_args(struct st_app_context* ctx, struct mtl_init_params* p, int
       case ST_ARG_NO_PAD_STATIC:
         ctx->tx_no_static_pad = true;
         break;
+      case ST_ARG_TIMESTAMP_FIRST_PKT:
+        ctx->tx_ts_first_pkt = true;
+        break;
+      case ST_ARG_TIMESTAMP_EPOCH:
+        ctx->tx_ts_epoch = true;
+        break;
+      case ST_ARG_TIMESTAMP_DELTA_US:
+        ctx->tx_ts_delta_us = atoi(optarg);
+        break;
+      case ST_ARG_NO_BULK:
+        ctx->tx_no_bulk = true;
+        break;
       case ST_ARG_SHAPING:
         if (!strcmp(optarg, "narrow"))
           ctx->tx_pacing_type = ST21_PACING_NARROW;
@@ -467,8 +529,9 @@ int st_app_parse_args(struct st_app_context* ctx, struct mtl_init_params* p, int
       case ST_ARG_TEST_TIME:
         ctx->test_time_s = atoi(optarg);
         break;
-      case ST_ARG_RX_EBU:
-        p->flags |= MTL_FLAG_RX_VIDEO_EBU;
+      case ST_ARG_RX_TIMING_PARSER:
+        ctx->enable_timing_parser = true;
+        p->flags |= MTL_FLAG_ENABLE_HW_TIMESTAMP;
         break;
       case ST_ARG_RX_MONO_POOL:
         p->flags |= MTL_FLAG_RX_MONO_POOL;
@@ -517,6 +580,14 @@ int st_app_parse_args(struct st_app_context* ctx, struct mtl_init_params* p, int
         p->flags |= MTL_FLAG_PTP_ENABLE;
         p->ptp_get_time_fn = NULL; /* clear the user ptp func */
         break;
+      case ST_ARG_LIB_PTP_SYNC_SYS:
+        p->flags |= MTL_FLAG_PTP_ENABLE; /* enable built-in ptp */
+        p->ptp_get_time_fn = NULL;       /* clear the user ptp func */
+        ctx->ptp_systime_sync = true;
+        break;
+      case ST_ARG_LIB_PHC2SYS:
+        p->flags |= MTL_FLAG_PHC2SYS_ENABLE;
+        break;
       case ST_ARG_LOG_LEVEL:
         if (!strcmp(optarg, "debug"))
           p->log_level = MTL_LOG_LEVEL_DEBUG;
@@ -531,6 +602,12 @@ int st_app_parse_args(struct st_app_context* ctx, struct mtl_init_params* p, int
         else
           err("%s, unknow log level %s\n", __func__, optarg);
         app_set_log_level(p->log_level);
+        break;
+      case ST_ARG_LOG_FILE:
+        st_set_mtl_log_file(ctx, optarg);
+        break;
+      case ST_ARG_LOG_TIME_MS:
+        mtl_set_log_prefix_formatter(log_prefix_time_ms);
         break;
       case ST_ARG_NB_TX_DESC:
         p->nb_tx_desc = atoi(optarg);
@@ -647,6 +724,26 @@ int st_app_parse_args(struct st_app_context* ctx, struct mtl_init_params* p, int
         break;
       case ST_ARG_SHARED_RX_QUEUES:
         p->flags |= MTL_FLAG_SHARED_RX_QUEUE;
+        break;
+      case ST_ARG_RX_USE_CNI:
+        p->flags |= MTL_FLAG_RX_USE_CNI;
+        break;
+      case ST_ARG_RX_UDP_PORT_ONLY:
+        p->flags |= MTL_FLAG_RX_UDP_PORT_ONLY;
+        break;
+      case ST_ARG_VIRTIO_USER:
+        p->flags |= MTL_FLAG_VIRTIO_USER;
+        break;
+      case ST_ARG_VIDEO_SHA_CHECK:
+        ctx->video_sha_check = true;
+        break;
+      case ST_ARG_ARP_TIMEOUT_S:
+        p->arp_timeout_s = atoi(optarg);
+        break;
+      case ST_ARG_RSS_SCH_NB:
+        for (enum mtl_port port = MTL_PORT_P; port < MTL_PORT_MAX; port++) {
+          p->rss_sch_nb[port] = atoi(optarg);
+        }
         break;
       case '?':
         break;

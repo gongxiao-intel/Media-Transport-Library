@@ -7,10 +7,10 @@
 // #define DEBUG
 #include <iphlpapi.h>
 
+#include "datapath/mt_queue.h"
 #include "mt_arp.h"
 #include "mt_cni.h"
 #include "mt_log.h"
-#include "mt_queue.h"
 #include "mt_sch.h"
 #include "mt_util.h"
 
@@ -345,14 +345,14 @@ static struct rte_flow* tap_create_flow(struct mt_cni_impl* cni, uint16_t port_i
   ret = rte_flow_validate(port_id, &attr, pattern, action, &error);
   if (ret < 0) {
     err("%s(%d), rte_flow_validate fail %d for queue %d, %s\n", __func__, port_id, ret, q,
-        mt_msg_safe(error.message));
+        mt_string_safe(error.message));
     return NULL;
   }
 
   r_flow = rte_flow_create(port_id, &attr, pattern, action, &error);
   if (!r_flow) {
     err("%s(%d), rte_flow_create fail for queue %d, %s\n", __func__, port_id, q,
-        mt_msg_safe(error.message));
+        mt_string_safe(error.message));
     return NULL;
   }
 
@@ -393,7 +393,7 @@ static struct rte_flow* tap_create_flow(struct mt_cni_impl* cni, uint16_t port_i
   r_flow = rte_flow_create(port_id, &attr, pattern, action, &error);
   if (!r_flow) {
     err("%s(%d), rte_flow_create 2 fail for queue %d, %s\n", __func__, port_id, q,
-        mt_msg_safe(error.message));
+        mt_string_safe(error.message));
     return NULL;
   }
   return r_flow;
@@ -461,7 +461,7 @@ static int tap_uninit_lcore(struct mtl_main_impl* impl) {
   }
   if (tap_ctx->has_lcore) {
     rte_eal_wait_lcore(tap_ctx->lcore);
-    mt_dev_put_lcore(impl, tap_ctx->lcore);
+    mt_sch_put_lcore(impl, tap_ctx->lcore);
   }
   return 0;
 }
@@ -521,6 +521,8 @@ static int tap_queues_uinit(struct mtl_main_impl* impl) {
   struct tap_rt_context* tap_ctx = (struct tap_rt_context*)cni->tap_context;
   for (int i = 0; i < num_ports; i++) {
     if (cni->tap_tx_q[i]) {
+      struct rte_mbuf* pad = mt_get_pad(impl, i);
+      if (pad) mt_txq_flush(cni->tap_tx_q[i], pad);
       mt_txq_put(cni->tap_tx_q[i]);
       cni->tap_tx_q[i] = NULL;
     }
@@ -730,7 +732,7 @@ static PSP_DEVICE_INTERFACE_DETAIL_DATA get_tap_device_interface_detail(HDEVINFO
   return NULL;
 }
 
-static int tap_device_init(struct mtl_main_impl* impl, struct mt_cni_impl* cni) {
+static int tap_device_init(struct mt_cni_impl* cni) {
   DWORD device_index = 0;
   HDEVINFO dev_info;
   SP_DEVINFO_DATA device_info_data;
@@ -869,7 +871,7 @@ int mt_tap_handle(struct mtl_main_impl* impl, enum mtl_port port) {
     rx = mt_rxq_burst(cni->tap_rx_q[port], pkts_rx, ST_CNI_RX_BURST_SIZE);
 
     if (rx > 0) {
-      cni->eth_rx_cnt[port] += rx;
+      cni->entries[port].eth_rx_cnt += rx;
       for (int i = 0; i < rx; i++) {
         tap_put_mbuf(tap_tx_ring, pkts_rx[i]);
       }
@@ -893,12 +895,12 @@ int mt_tap_init(struct mtl_main_impl* impl) {
   ret = tap_queues_init(impl, cni);
   if (ret < 0) return ret;
 
-  ret = tap_device_init(impl, cni);
+  ret = tap_device_init(cni);
   if (ret < 0) return ret;
 
   rte_atomic32_set(&cni->stop_tap, 0);
   tap_ctx->has_lcore = false;
-  ret = mt_dev_get_lcore(impl, &lcore);
+  ret = mt_sch_get_lcore(impl, &lcore, MT_LCORE_TYPE_TAP);
   if (ret < 0) {
     err("%s, get lcore fail %d\n", __func__, ret);
     mt_tap_uinit(impl);

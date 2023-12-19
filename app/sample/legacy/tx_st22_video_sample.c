@@ -55,6 +55,7 @@ static int tx_st22_frame_done(void* priv, uint16_t frame_idx,
   struct tx_st22_sample_ctx* s = priv;
   int ret;
   struct st_tx_frame* framebuff = &s->framebuffs[frame_idx];
+  MTL_MAY_UNUSED(meta);
 
   st_pthread_mutex_lock(&s->wake_mutex);
   if (ST_TX_FRAME_IN_TRANSMITTING == framebuff->stat) {
@@ -75,6 +76,9 @@ static int tx_st22_frame_done(void* priv, uint16_t frame_idx,
 
 static void st22_encode_frame(struct tx_st22_sample_ctx* s, void* codestream_addr,
                               size_t max_codestream_size, size_t* codestream_size) {
+  MTL_MAY_UNUSED(codestream_addr);
+  MTL_MAY_UNUSED(max_codestream_size);
+
   /* call the real encoding here, sample just sleep */
   st_usleep(10 * 1000);
   *codestream_size = s->bytes_per_frame;
@@ -169,9 +173,9 @@ int main(int argc, char** argv) {
     ops_tx.num_port = 1;
     memcpy(ops_tx.dip_addr[MTL_SESSION_PORT_P], ctx.tx_dip_addr[MTL_PORT_P],
            MTL_IP_ADDR_LEN);
-    strncpy(ops_tx.port[MTL_SESSION_PORT_P], ctx.param.port[MTL_PORT_P],
-            MTL_PORT_MAX_LEN);
-    ops_tx.udp_port[MTL_SESSION_PORT_P] = ctx.udp_port + i;
+    snprintf(ops_tx.port[MTL_SESSION_PORT_P], MTL_PORT_MAX_LEN, "%s",
+             ctx.param.port[MTL_PORT_P]);
+    ops_tx.udp_port[MTL_SESSION_PORT_P] = ctx.udp_port + i * 2;
     ops_tx.pacing = ST21_PACING_NARROW;
     ops_tx.width = ctx.width;
     ops_tx.height = ctx.height;

@@ -25,6 +25,7 @@ static int tx_video_next_frame(void* priv, uint16_t* next_frame_idx,
                                struct st20_tx_frame_meta* meta) {
   struct tv_split_sample_ctx* s = priv;
   int ret = 0;
+  MTL_MAY_UNUSED(meta);
 
   if (!s->handle) return -EIO; /* not ready */
 
@@ -50,6 +51,9 @@ static int tx_video_next_frame(void* priv, uint16_t* next_frame_idx,
 
 int tx_video_frame_done(void* priv, uint16_t frame_idx, struct st20_tx_frame_meta* meta) {
   struct tv_split_sample_ctx* s = priv;
+  MTL_MAY_UNUSED(frame_idx);
+  MTL_MAY_UNUSED(meta);
+
   s->fb_send++;
 
   /* when using ext frame, the frame lifetime should be considered */
@@ -103,14 +107,14 @@ int main(int argc, char** argv) {
     ops_tx.num_port = 1;
     memcpy(ops_tx.dip_addr[MTL_SESSION_PORT_P], ctx.tx_dip_addr[MTL_PORT_P],
            MTL_IP_ADDR_LEN);
-    strncpy(ops_tx.port[MTL_SESSION_PORT_P], ctx.param.port[MTL_PORT_P],
-            MTL_PORT_MAX_LEN);
+    snprintf(ops_tx.port[MTL_SESSION_PORT_P], MTL_PORT_MAX_LEN, "%s",
+             ctx.param.port[MTL_PORT_P]);
 
     struct st20_pgroup st20_pg;
     st20_get_pgroup(ST20_FMT_YUV_422_10BIT, &st20_pg);
 
     ops_tx.flags |= ST20_TX_FLAG_EXT_FRAME;
-    ops_tx.udp_port[MTL_SESSION_PORT_P] = ctx.udp_port + i;
+    ops_tx.udp_port[MTL_SESSION_PORT_P] = ctx.udp_port + i * 2;
     ops_tx.pacing = ST21_PACING_NARROW;
     ops_tx.packing = ST20_PACKING_GPM_SL;
     ops_tx.type = ST20_TYPE_FRAME_LEVEL;
@@ -145,7 +149,12 @@ int main(int argc, char** argv) {
         goto dma_alloc;
       }
       struct stat st;
-      fstat(fd, &st);
+      if (fstat(fd, &st) < 0) {
+        err("%s, fstat %s fail\n", __func__, ctx.tx_url);
+        close(fd);
+        ret = -EIO;
+        goto error;
+      }
       if (st.st_size < (app[i]->fb_size * app[i]->fb_cnt)) {
         err("%s, %s file size too small %" PRIu64 "\n", __func__, ctx.tx_url, st.st_size);
         close(fd);

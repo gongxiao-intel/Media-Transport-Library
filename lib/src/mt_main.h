@@ -3,16 +3,13 @@
  */
 
 #define _GNU_SOURCE
+#include <json-c/json.h>
 #include <math.h>
 #include <rte_alarm.h>
 #include <rte_arp.h>
 #include <rte_errno.h>
 #include <rte_ethdev.h>
 #include <rte_thash.h>
-#ifdef MTL_HAS_KNI
-#include <rte_kni.h>
-#endif
-#include <json-c/json.h>
 #include <rte_tm.h>
 #include <rte_version.h>
 #include <rte_vfio.h>
@@ -23,6 +20,7 @@
 #include "mt_mem.h"
 #include "mt_platform.h"
 #include "mt_quirk.h"
+#include "mtl_sch_api.h"
 #include "st2110/st_header.h"
 
 #ifndef _MT_LIB_MAIN_HEAD_H_
@@ -42,8 +40,6 @@
 
 #define MT_STAILQ_HEAD(name, type) RTE_STAILQ_HEAD(name, type)
 #define MT_STAILQ_ENTRY(type) RTE_STAILQ_ENTRY(type)
-
-#define MT_MAY_UNUSED(x) (void)(x)
 
 #define MT_MBUF_CACHE_SIZE (128)
 #define MT_MBUF_HEADROOM_SIZE (RTE_PKTMBUF_HEADROOM)          /* 128 */
@@ -88,6 +84,9 @@
 #define NS_PER_US (1000)
 #define US_PER_MS (1000)
 
+#define MT_TIMEOUT_INFINITE (INT_MAX)
+#define MT_TIMEOUT_ZERO (0)
+
 struct mtl_main_impl; /* forward declare */
 
 /* dynamic fields are implemented after rte_mbuf */
@@ -116,24 +115,43 @@ enum mt_port_type {
   MT_PORT_ERR = 0,
   MT_PORT_VF,
   MT_PORT_PF,
-  MT_PORT_AF_XDP,
+  MT_PORT_DPDK_AF_XDP,
+  MT_PORT_DPDK_AF_PKT,
+  MT_PORT_KERNEL_SOCKET,
+  MT_PORT_NATIVE_AF_XDP,
+};
+
+enum mt_rl_type {
+  MT_RL_TYPE_NONE = 0,
+  /* RL based on RTE Generic Traffic Manager */
+  MT_RL_TYPE_TM,
+  /* XDP based on queue sysfs */
+  MT_RL_TYPE_XDP_QUEUE_SYSFS,
 };
 
 enum mt_driver_type {
-  MT_DRV_ERR = 0,
-  MT_DRV_ICE,       /* ice pf, net_ice */
-  MT_DRV_I40E,      /* flv pf, net_i40e */
-  MT_DRV_IAVF,      /* IA vf, net_iavf */
-  MT_DRV_AF_XDP,    /* af xdp, net_af_xdp */
+  MT_DRV_DEFAULT = 0,
+  MT_DRV_ICE,  /* ice pf, net_ice */
+  MT_DRV_I40E, /* flv pf, net_i40e */
+  MT_DRV_IAVF, /* IA vf, net_iavf */
+  /* dpdk af xdp, net_af_xdp */
+  MT_DRV_DPDK_AF_XDP,
   MT_DRV_E1000_IGB, /* e1000 igb, net_e1000_igb */
   MT_DRV_IGC,       /* igc, net_igc */
-  MT_DRV_ENA,       /* ena, net_ena */
+  MT_DRV_ENA,       /* aws ena, net_ena */
+  MT_DRV_MLX5,      /* mlx, mlx5_pci */
+  /* dpdk af packet, net_af_packet */
+  MT_DRV_DPDK_AF_PKT,
+  /* kernel based socket */
+  MT_DRV_KERNEL_SOCKET,
+  /* native af xdp */
+  MT_DRV_NATIVE_AF_XDP,
 };
 
 enum mt_flow_type {
-  MT_FLOW_ALL,
-  MT_FLOW_NO_IP,
-  MT_FLOW_NONE,
+  MT_FLOW_ALL,   /* full feature on rte flow */
+  MT_FLOW_NO_IP, /* no ip on rte flow, port is supported */
+  MT_FLOW_NONE,  /* no rte flow */
 };
 
 enum mt_ptp_l_mode {
@@ -148,18 +166,19 @@ enum mt_ptp_addr_mode {
 };
 
 struct mt_pi_servo {
-	double offset[2];
-	double local[2];
-	double drift;
-	int count;
+  double offset[2];
+  double local[2];
+  double drift;
+  int count;
 };
 
 struct mt_phc2sys_impl {
-  struct mt_pi_servo servo;
+  struct mt_pi_servo servo; /* PI for phc2sys */
   long realtime_hz;
   long realtime_nominal_tick;
   int64_t stat_delta_max;
-  bool    stat_sync;
+  bool locked;
+  uint16_t stat_sync_keep;
 };
 
 struct mt_ptp_impl {
@@ -167,6 +186,27 @@ struct mt_ptp_impl {
   struct mt_phc2sys_impl phc2sys;
   enum mtl_port port;
   uint16_t port_id;
+  bool active; /* if the ptp stack is running */
+  bool no_timesync;
+  /*
+   * The flag indicates Qbv (IEEE 802.1Qbv) traffic shaper
+   * enable.
+   *
+   * The IEEE 802.1Qbv is designed to separate traffics
+   * transmission into different time slices to prevent
+   * traffics transmission interfering.
+   */
+  bool qbv_enabled;
+  int64_t no_timesync_delta;
+
+  /* for no cni case */
+  struct mt_rxq_entry* gen_rxq;   /* for MT_PTP_UDP_GEN_PORT */
+  struct mt_rxq_entry* event_rxq; /* for MT_PTP_UDP_EVENT_PORT */
+  struct mt_sch_tasklet_impl* rxq_tasklet;
+
+  struct mt_phc2sys_impl phc2sys;
+  bool phc2sys_active;
+  struct mt_pi_servo servo; /* PI for PTP */
 
   struct rte_mempool* mbuf_pool;
 
@@ -191,9 +231,9 @@ struct mt_ptp_impl {
   uint16_t t3_sequence_id;
   uint64_t t4;
 
-  struct mt_pi_servo servo;
-  int64_t path_delay;
-  uint32_t skip_sync_cnt;
+  bool locked;
+  bool connected;
+
   /* result */
   uint64_t delta_result_cnt;
   uint64_t delta_result_sum;
@@ -202,6 +242,8 @@ struct mt_ptp_impl {
   int32_t expect_result_cnt;
   int32_t expect_result_sum;
   int32_t expect_result_avg;
+  int32_t expect_correct_result_sum;
+  int32_t expect_correct_result_avg;
   uint64_t expect_result_start_ns;
   uint64_t expect_result_period_ns;
 
@@ -238,48 +280,93 @@ struct mt_ptp_impl {
   int32_t stat_result_err;
   int32_t stat_sync_timeout_err;
   int32_t stat_sync_cnt;
+  uint16_t stat_sync_keep;
 };
 
-struct mt_cni_priv {
-  struct mtl_main_impl* impl;
-  enum mtl_port port;
+/* used for cni sys queue */
+#define MT_RXQ_FLOW_F_SYS_QUEUE (MTL_BIT32(0))
+/* no ip flow, only use port flow, for udp transport */
+#define MT_RXQ_FLOW_F_NO_IP (MTL_BIT32(1))
+/* if apply destination port flow or not */
+#define MT_RXQ_FLOW_F_NO_PORT (MTL_BIT32(2))
+/* child of cni to save queue usage */
+#define MT_RXQ_FLOW_F_FORCE_CNI (MTL_BIT32(3))
+/* if request hdr split */
+#define MT_RXQ_FLOW_F_HDR_SPLIT (MTL_BIT32(4))
+/* force to use socket, only for MT_DRV_F_KERNEL_BASED */
+#define MT_RXQ_FLOW_F_FORCE_SOCKET (MTL_BIT32(5))
+
+/* request of rx queue flow */
+struct mt_rxq_flow {
+  /* mandatory if not no_ip_flow */
+  uint8_t dip_addr[MTL_IP_ADDR_LEN]; /* rx destination IP */
+  /* source ip is ignored if destination is a multicast address */
+  uint8_t sip_addr[MTL_IP_ADDR_LEN]; /* source IP */
+  uint16_t dst_port;                 /* udp destination port */
+  /* value of MT_RXQ_FLOW_F_* */
+  uint32_t flags;
+  /* rate in bytes */
+  uint64_t bytes_per_sec;
+
+  /* optional for hdr split */
+  void* hdr_split_mbuf_cb_priv;
+#ifdef ST_HAS_DPDK_HDR_SPLIT /* rte_eth_hdrs_mbuf_callback_fn define with this marco */
+  rte_eth_hdrs_mbuf_callback_fn hdr_split_mbuf_cb;
+#endif
 };
 
-struct mt_cni_udp_entry {
+struct mt_cni_udp_detect_entry {
   uint32_t tuple[3]; /* udp tuple identify */
   int pkt_cnt;
   /* linked list */
-  MT_TAILQ_ENTRY(mt_cni_udp_entry) next;
+  MT_TAILQ_ENTRY(mt_cni_udp_detect_entry) next;
 };
 
-MT_TAILQ_HEAD(mt_cni_udp_list, mt_cni_udp_entry);
+MT_TAILQ_HEAD(mt_cni_udp_detect_list, mt_cni_udp_detect_entry);
+
+struct mt_csq_entry {
+  int idx;
+  struct mt_cni_entry* parent;
+  struct mt_rxq_flow flow;
+  struct rte_ring* ring;
+  uint32_t stat_enqueue_cnt;
+  uint32_t stat_dequeue_cnt;
+  uint32_t stat_enqueue_fail_cnt;
+  /* linked list */
+  MT_TAILQ_ENTRY(mt_csq_entry) next;
+};
+
+MT_TAILQ_HEAD(mt_csq_queue, mt_csq_entry);
+
+struct mt_cni_entry {
+  struct mtl_main_impl* impl;
+  enum mtl_port port;
+  struct mt_rxq_entry* rxq;
+
+  struct mt_csq_queue csq_queues; /* for cni udp queue */
+  int csq_idx;
+  rte_spinlock_t csq_lock; /* protect csq_queues */
+
+  struct mt_cni_udp_detect_list udp_detect; /* for udp stream debug usage */
+
+  /* stat */
+  uint32_t eth_rx_cnt;
+  uint64_t eth_rx_bytes;
+  uint32_t virtio_rx_cnt;      /* rx pkts to kernel */
+  uint32_t virtio_rx_fail_cnt; /* rx failed kernel pkts */
+  uint32_t virtio_tx_cnt;      /* tx pkts from kernal */
+  uint32_t virtio_tx_fail_cnt; /* tx failed kernal pkts */
+};
 
 struct mt_cni_impl {
-  bool used; /* if enable cni */
-  int num_ports;
+  struct mtl_main_impl* parent;
 
-  struct mt_rxq_entry* rxq[MTL_PORT_MAX];
-  struct mt_cni_priv cni_priv[MTL_PORT_MAX];
   pthread_t tid; /* thread id for rx */
   rte_atomic32_t stop_thread;
   bool lcore_tasklet;
   struct mt_sch_tasklet_impl* tasklet;
 
-  struct mt_cni_udp_list udps[MTL_PORT_MAX]; /* for udp stream debug usage */
-
-  /* stat */
-  uint32_t eth_rx_cnt[MTL_PORT_MAX];
-  uint64_t eth_rx_bytes[MTL_PORT_MAX];
-
-#ifdef MTL_HAS_KNI
-  bool has_kni_kmod;
-  rte_atomic32_t if_up[MTL_PORT_MAX];
-  struct rte_kni_conf conf[MTL_PORT_MAX];
-  struct rte_kni* rkni[MTL_PORT_MAX];
-  pthread_t kni_bkg_tid; /* bkg thread id for kni */
-  rte_atomic32_t stop_kni;
-  int kni_rx_cnt[MTL_PORT_MAX];
-#endif
+  struct mt_cni_entry entries[MTL_PORT_MAX];
 
 #ifdef MTL_HAS_TAP
   pthread_t tap_bkg_tid; /* bkg thread id for tap */
@@ -306,11 +393,29 @@ struct mt_arp_impl {
   struct mtl_main_impl* parent;
 };
 
+struct mt_mcast_src_entry {
+  uint32_t src_ip;
+  uint16_t src_ref_cnt;
+  TAILQ_ENTRY(mt_mcast_src_entry) entries;
+};
+
+TAILQ_HEAD(mt_mcast_src_list, mt_mcast_src_entry);
+
+struct mt_mcast_group_entry {
+  uint32_t group_ip;
+  uint16_t group_ref_cnt;
+  struct mt_mcast_src_list src_list;
+  uint16_t src_num;
+  TAILQ_ENTRY(mt_mcast_group_entry) entries;
+};
+
+TAILQ_HEAD(mt_mcast_group_list, mt_mcast_group_entry);
+
 struct mt_mcast_impl {
   pthread_mutex_t group_mutex;
-  uint32_t group_ip[MT_MCAST_GROUP_MAX];
-  uint32_t group_ref_cnt[MT_MCAST_GROUP_MAX];
+  struct mt_mcast_group_list group_list;
   uint16_t group_num;
+  bool has_external_query;
 };
 
 enum mt_dhcp_status {
@@ -338,37 +443,10 @@ struct mt_dhcp_impl {
   uint8_t dns[MTL_IP_ADDR_LEN];
 };
 
-#define MT_TASKLET_HAS_PENDING (1)
-#define MT_TASKLET_ALL_DONE (0)
-
-/*
- * Tasklets share the time slot on a lcore,
- * only non-block method can be used in handler routine.
- */
-struct mt_sch_tasklet_ops {
-  char* name;
-  void* priv; /* private data to the callback */
-
-  int (*pre_start)(void* priv);
-  int (*start)(void* priv);
-  int (*stop)(void* priv);
-  /*
-   * return MT_TASKLET_ALL_DONE if no any pending task, all are done
-   * return MT_TASKLET_HAS_PENDING if it has pending tasks.
-   */
-  int (*handler)(void* priv);
-  /*
-   * the recommend sleep time(us) if tasklet report MT_TASKLET_ALL_DONE.
-   * also this value can be set by mt_tasklet_set_sleep at runtime.
-   * leave to zero if you don't know.
-   */
-  uint64_t advice_sleep_us;
-};
-
 struct mt_sch_tasklet_impl {
-  struct mt_sch_tasklet_ops ops;
+  struct mtl_tasklet_ops ops;
   char name[ST_MAX_NAME_LEN];
-  struct mt_sch_impl* sch;
+  struct mtl_sch_impl* sch;
 
   int idx;
   bool request_exit;
@@ -383,6 +461,7 @@ struct mt_sch_tasklet_impl {
 enum mt_sch_type {
   MT_SCH_TYPE_DEFAULT = 0,
   MT_SCH_TYPE_RX_VIDEO_ONLY,
+  MT_SCH_TYPE_APP, /* created by user */
   MT_SCH_TYPE_MAX,
 };
 
@@ -391,11 +470,13 @@ typedef uint64_t mt_sch_mask_t;
 /* all sch */
 #define MT_SCH_MASK_ALL ((mt_sch_mask_t)-1)
 
-struct mt_sch_impl {
+struct mtl_sch_impl {
+  char name[32];
   pthread_mutex_t mutex; /* protect sch context */
   struct mt_sch_tasklet_impl** tasklet;
-  int nb_tasklets;     /* the number of tasklet in current sch */
-  int max_tasklet_idx; /* max tasklet index */
+  uint32_t nb_tasklets; /* the number of tasklet in current sch */
+  /* max tasklet index */
+  volatile int max_tasklet_idx;
   unsigned int lcore;
   bool run_in_thread; /* Run the tasklet inside one thread instead of a pinned lcore. */
   pthread_t tid;      /* thread id for run_in_thread */
@@ -435,6 +516,17 @@ struct mt_sch_impl {
   bool rx_a_init;
   pthread_mutex_t rx_a_mgr_mutex; /* protect rx_a_mgr */
 
+  /* one tx ancillary sessions mgr/transmitter for one sch */
+  struct st_tx_ancillary_sessions_mgr tx_anc_mgr;
+  struct st_ancillary_transmitter_impl anc_trs;
+  bool tx_anc_init;
+  pthread_mutex_t tx_anc_mgr_mutex; /* protect tx_anc_mgr */
+
+  /* one rx ancillary sessions mgr for one sch */
+  struct st_rx_ancillary_sessions_mgr rx_anc_mgr;
+  bool rx_anc_init;
+  pthread_mutex_t rx_anc_mgr_mutex; /* protect rx_anc_mgr */
+
   /* sch sleep info */
   bool allow_sleep;
   pthread_cond_t sleep_wake_cond;
@@ -451,11 +543,20 @@ struct mt_sch_impl {
   uint64_t stat_sleep_ns_max;
 };
 
+struct mt_lcore_mgr {
+  struct mt_lcore_shm* lcore_shm;
+  int lcore_shm_id;
+};
+
 struct mt_sch_mgr {
-  struct mt_sch_impl sch[MT_MAX_SCH_NUM];
+  struct mtl_sch_impl sch[MT_MAX_SCH_NUM];
   /* active sch cnt */
   rte_atomic32_t sch_cnt;
   pthread_mutex_t mgr_mutex; /* protect sch mgr */
+
+  struct mt_lcore_mgr lcore_mgr;
+  int lcore_lock_fd;
+  bool local_lcores_active[RTE_MAX_LCORE]; /* local lcores active map */
 };
 
 struct mt_pacing_train_result {
@@ -469,30 +570,8 @@ struct mt_rl_shaper {
   int idx;
 };
 
-typedef int (*mt_rsq_mbuf_cb)(void* priv, struct rte_mbuf** mbuf, uint16_t nb);
-
-/* request of rx queue flow */
-struct mt_rxq_flow {
-  /* for cni queue */
-  bool sys_queue;
-  bool no_ip_flow; /* no ip flow, only use port flow, for udp transport */
-  /* mandatory if not no_ip_flow */
-  uint8_t dip_addr[MTL_IP_ADDR_LEN]; /* rx destination IP */
-  /* source ip is ignored if destination is a multicast address */
-  uint8_t sip_addr[MTL_IP_ADDR_LEN]; /* source IP */
-  bool no_port_flow;                 /* if apply destination port flow or not */
-  uint16_t dst_port;                 /* udp destination port */
-
-  /* optional */
-  bool hdr_split; /* if request hdr split */
-  void* hdr_split_mbuf_cb_priv;
-#ifdef ST_HAS_DPDK_HDR_SPLIT /* rte_eth_hdrs_mbuf_callback_fn define with this marco */
-  rte_eth_hdrs_mbuf_callback_fn hdr_split_mbuf_cb;
-#endif
-};
-
 struct mt_rx_flow_rsp {
-  int flow_id; /* flow id for afxdp */
+  int flow_id; /* flow id for socket based flow */
   struct rte_flow* flow;
   uint16_t queue_id;
 };
@@ -515,8 +594,41 @@ struct mt_tx_queue {
   uint16_t port_id;
   uint16_t queue_id;
   bool active;
+  /* VF, caused by malicious detection in the PF */
+  bool fatal_error;
   int rl_shapers_mapping; /* map to tx_rl_shapers */
   uint64_t bps;           /* bytes per sec for rate limit */
+};
+
+/* use rte_eth_dev_set_mc_addr_list instead of rte_eth_dev_mac_addr_add for multicast */
+#define MT_DRV_F_USE_MC_ADDR_LIST (MTL_BIT64(0))
+/* no rte_eth_stats_reset support */
+#define MT_DRV_F_NO_STATUS_RESET (MTL_BIT64(1))
+/* no CNI support for RX */
+#define MT_DRV_F_NO_CNI (MTL_BIT64(2))
+/* the driver is not dpdk based */
+#define MT_DRV_F_NOT_DPDK_PMD (MTL_BIT64(3))
+/* use kernel socket control path for arp/mcast */
+#define MT_DRV_F_USE_KERNEL_CTL (MTL_BIT64(4))
+/* no priv for the mbuf in the rx queue */
+#define MT_DRV_F_RX_POOL_COMMON (MTL_BIT64(5))
+/* no rx flow, for MTL_PMD_DPDK_AF_PACKET and MTL_PMD_KERNEL_SOCKET */
+#define MT_DRV_F_RX_NO_FLOW (MTL_BIT64(6))
+/* mcast control in data path, for MTL_PMD_KERNEL_SOCKET */
+#define MT_DRV_F_MCAST_IN_DP (MTL_BIT64(7))
+/* no sys tx queue support */
+#define MT_DRV_F_NO_SYS_TX_QUEUE (MTL_BIT64(8))
+/* kernel based backend */
+#define MT_DRV_F_KERNEL_BASED (MTL_BIT64(9))
+
+struct mt_dev_driver_info {
+  char* name;
+  enum mt_port_type port_type;
+  enum mt_driver_type drv_type;
+
+  enum mt_flow_type flow_type;
+  enum mt_rl_type rl_type;
+  uint64_t flags; /* value with MT_DRV_F_* */
 };
 
 struct mt_interface {
@@ -524,9 +636,7 @@ struct mt_interface {
   enum mtl_port port;
   uint16_t port_id;
   struct rte_eth_dev_info dev_info;
-  enum mt_port_type port_type;
-  enum mt_driver_type drv_type;
-  enum mt_flow_type flow_type;
+  struct mt_dev_driver_info drv_info;
   enum mtl_rss_mode rss_mode;
   enum mtl_net_proto net_proto;
   int socket_id;                          /* socket id for the port */
@@ -551,16 +661,12 @@ struct mt_interface {
   pthread_mutex_t vf_cmd_mutex;
 
   /* tx queue resources */
-  uint16_t max_tx_queues;
+  uint16_t nb_tx_q;
   struct mt_tx_queue* tx_queues;
   pthread_mutex_t tx_queues_mutex; /* protect tx_queues */
 
-  /* the shared tx sys queue */
-  struct mt_txq_entry* txq_sys_entry;
-  pthread_mutex_t tx_sys_queue_mutex; /* protect tx_sys_queue */
-
   /* rx queue resources */
-  uint16_t max_rx_queues;
+  uint16_t nb_rx_q;
   uint16_t system_rx_queues_end;
   uint16_t hdr_split_rx_queues_end;
   struct mt_rx_queue* rx_queues;
@@ -586,12 +692,53 @@ struct mt_interface {
   uint64_t tsc_time_base;
   uint64_t real_time_base;
 
-  struct mt_dev_stats* dev_stats; /* for nic without reset func */
+  rte_spinlock_t stats_lock;
+  struct mtl_port_status* dev_stats_not_reset; /* for nic without reset func */
+  struct mtl_port_status* dev_stats_sw;        /* for MT_DRV_F_NOT_DPDK_PMD */
+  struct mtl_port_status stats_sum;            /* for dev_inf_stat dump */
+  struct mtl_port_status user_stats_port;      /* for mtl_get_port_stats */
+
+  uint64_t simulate_malicious_pkt_tsc;
+
+  uint16_t virtio_port_id; /* virtio_user port id */
+  bool virtio_port_active; /* virtio_user port active */
+
+  /* the mac for kernel socket based transport */
+  struct rte_ether_addr k_mac_addr;
+
+  void* xdp;
+};
+
+struct mt_user_info {
+  char hostname[64];
+  char user[32];
+  /* the current process name */
+  char comm[64];
+  pid_t pid;
+};
+
+/* remember to update lcore_type_names if any item changed */
+enum mt_lcore_type {
+  MT_LCORE_TYPE_SCH = 0, /* lib scheduler used */
+  MT_LCORE_TYPE_TAP,
+  MT_LCORE_TYPE_RXV_RING_LCORE,
+  MT_LCORE_TYPE_USER,     /* allocated by application */
+  MT_LCORE_TYPE_SCH_USER, /* application allocated by mtl_sch_create  */
+  MT_LCORE_TYPE_MAX,
+};
+
+struct mt_lcore_shm_entry {
+  struct mt_user_info u_info;
+  pid_t pid;
+  enum mt_lcore_type type;
+  bool active;
 };
 
 struct mt_lcore_shm {
-  int used;                          /* number of used lcores */
-  bool lcores_active[RTE_MAX_LCORE]; /* lcores active map */
+  /* number of used lcores */
+  int used;
+  /* lcores map info */
+  struct mt_lcore_shm_entry lcores_info[RTE_MAX_LCORE];
 };
 
 typedef int (*mt_dma_drop_mbuf_cb)(void* priv, struct rte_mbuf* mbuf);
@@ -658,7 +805,9 @@ struct mt_admin {
 
 struct mt_kport_info {
   /* dpdk port name for kernel port(MTL_PMD_DPDK_AF_XDP) */
-  char port[MTL_PORT_MAX][MTL_PORT_MAX_LEN];
+  char dpdk_port[MTL_PORT_MAX][MTL_PORT_MAX_LEN];
+  /* kernel interface name */
+  char kernel_if[MTL_PORT_MAX][MTL_PORT_MAX_LEN];
 };
 
 struct mt_map_item {
@@ -696,19 +845,22 @@ struct mt_stat_item {
 MT_TAILQ_HEAD(mt_stat_items_list, mt_stat_item);
 
 struct mt_stat_mgr {
-  pthread_mutex_t mutex;
+  struct mtl_main_impl* parent;
+
+  uint64_t dump_period_us;
+  rte_spinlock_t lock;
   struct mt_stat_items_list head;
+
+  pthread_t stat_tid;
+  pthread_cond_t stat_wake_cond;
+  pthread_mutex_t stat_wake_mutex;
+  rte_atomic32_t stat_stop;
 };
 
-struct mt_dev_stats {
-  uint64_t rx_pkts;
-  uint64_t rx_bytes;
-  uint64_t rx_missed;
-  uint64_t rx_errors;
-  uint64_t rx_nombuf;
-  uint64_t tx_pkts;
-  uint64_t tx_bytes;
-  uint64_t tx_errors;
+enum mt_queue_mode {
+  MT_QUEUE_MODE_DPDK = 0,
+  MT_QUEUE_MODE_XDP,
+  MT_QUEUE_MODE_MAX,
 };
 
 struct mt_rsq_impl; /* forward delcare */
@@ -717,7 +869,6 @@ struct mt_rsq_entry {
   uint16_t queue_id;
   int idx;
   struct mt_rxq_flow flow;
-  uint16_t dst_port_net;
   struct mt_rx_flow_rsp* flow_rsp;
   struct mt_rsq_impl* parent;
   struct rte_ring* ring;
@@ -732,9 +883,11 @@ MT_TAILQ_HEAD(mt_rsq_entrys_list, mt_rsq_entry);
 struct mt_rsq_queue {
   uint16_t port_id;
   uint16_t queue_id;
+  /* for native xdp based shared queue */
+  struct mt_rx_xdp_entry* xdp;
   /* List of rsq entry */
   struct mt_rsq_entrys_list head;
-  pthread_mutex_t mutex;
+  rte_spinlock_t mutex;
   rte_atomic32_t entry_cnt;
   int entry_idx;
   struct mt_rsq_entry* cni_entry;
@@ -747,17 +900,28 @@ struct mt_rsq_impl {
   struct mtl_main_impl* parent;
   enum mtl_port port;
   /* sq rx queue resources */
-  uint16_t max_rsq_queues;
+  uint16_t nb_rsq_queues;
   struct mt_rsq_queue* rsq_queues;
+  enum mt_queue_mode queue_mode;
 };
+
+/* used for sys queue */
+#define MT_TXQ_FLOW_F_SYS_QUEUE (MTL_BIT32(0))
+/* if launch time enabled */
+#define MT_TXQ_FLOW_F_LAUNCH_TIME (MTL_BIT32(1))
+/* force to use socket, only for MT_DRV_F_KERNEL_BASED */
+#define MT_TXQ_FLOW_F_FORCE_SOCKET (MTL_BIT32(1))
 
 /* request of tx queue flow */
 struct mt_txq_flow {
-  bool sys_queue;
   uint64_t bytes_per_sec; /* rl rate in byte */
   /* mandatory if not sys_queue */
   uint8_t dip_addr[MTL_IP_ADDR_LEN]; /* tx destination IP */
   uint16_t dst_port;                 /* udp destination port */
+  /* value with MT_TXQ_FLOW_F_* */
+  uint32_t flags;
+  /* only for kernel socket */
+  uint16_t gso_sz;
 };
 
 struct mt_tsq_impl; /* forward delcare */
@@ -777,11 +941,15 @@ struct mt_tsq_queue {
   uint16_t queue_id;
   /* shared tx mempool */
   struct rte_mempool* tx_pool;
+  /* for native xdp based shared queue */
+  struct mt_tx_xdp_entry* xdp;
+
   /* List of rsq entry */
   struct mt_tsq_entrys_list head;
   pthread_mutex_t mutex;
-  pthread_mutex_t tx_mutex;
+  rte_spinlock_t tx_mutex;
   rte_atomic32_t entry_cnt;
+  bool fatal_error;
   /* stat */
   int stat_pkts_send;
 };
@@ -790,8 +958,9 @@ struct mt_tsq_impl {
   struct mtl_main_impl* parent;
   enum mtl_port port;
   /* sq tx queue resources */
-  uint16_t max_tsq_queues;
+  uint16_t nb_tsq_queues;
   struct mt_tsq_queue* tsq_queues;
+  enum mt_queue_mode queue_mode;
 };
 
 struct mt_srss_entry {
@@ -807,17 +976,137 @@ struct mt_srss_entry {
 };
 MT_TAILQ_HEAD(mt_srss_entrys_list, mt_srss_entry);
 
+struct mt_srss_list {
+  struct mt_srss_entrys_list entrys_list;
+  rte_spinlock_t mutex; /* protect entrys_list */
+  int idx;
+};
+
+struct mt_srss_sch {
+  struct mt_srss_impl* parent;
+  int idx;
+  uint16_t q_start;
+  uint16_t q_end;
+  struct mtl_sch_impl* sch;
+  struct mt_sch_tasklet_impl* tasklet;
+  int quota_mps;
+
+  uint32_t stat_pkts_rx;
+};
+
 struct mt_srss_impl {
   struct mtl_main_impl* parent;
-  pthread_mutex_t mutex;
+
   enum mtl_port port;
-  struct mt_srss_entrys_list head;
+  enum mt_queue_mode queue_mode;
+  uint16_t nb_rx_q;
+
+  /* map entry to different heads as the UDP port number */
+  struct mt_srss_list* lists;
+  int lists_sz;
+
+  /* sch threads */
+  struct mt_srss_sch* schs;
+  int schs_cnt;
+
   pthread_t tid;
   rte_atomic32_t stop_thread;
-  struct mt_sch_tasklet_impl* tasklet;
-  struct mt_sch_impl* sch;
+
   struct mt_srss_entry* cni_entry;
   int entry_idx;
+
+  /* for native xdp based srss */
+  struct mt_rx_xdp_entry** xdps;
+};
+
+#define MT_DP_SOCKET_THREADS_MAX (4)
+
+struct mt_tx_socket_thread {
+  struct mt_tx_socket_entry* parent;
+  int idx;
+  int fd;
+  pthread_t tid;
+  rte_atomic32_t stop_thread;
+
+#ifndef WINDOWSENV
+  struct sockaddr_in send_addr;
+  struct msghdr msg;
+  char msg_control[CMSG_SPACE(sizeof(uint16_t))];
+#endif
+
+  int stat_tx_try;
+  int stat_tx_pkt;
+  int stat_tx_gso;
+};
+
+struct mt_tx_socket_entry {
+  struct mtl_main_impl* parent;
+  enum mtl_port port;
+  struct mt_txq_flow flow;
+
+  uint64_t rate_limit_per_thread;
+  uint16_t gso_sz;
+  int threads;
+  struct rte_ring* ring;
+  struct mt_tx_socket_thread threads_data[MT_DP_SOCKET_THREADS_MAX];
+  bool stat_registered;
+};
+
+struct mt_rx_socket_thread {
+  struct mt_rx_socket_entry* parent;
+  int idx;
+  struct rte_mbuf* mbuf;
+  pthread_t tid;
+  rte_atomic32_t stop_thread;
+
+  int stat_rx_try;
+  int stat_rx_pkt;
+};
+
+struct mt_rx_socket_entry {
+  struct mtl_main_impl* parent;
+  enum mtl_port port;
+  struct mt_rxq_flow flow;
+
+  struct rte_mempool* pool;
+  uint16_t pool_element_sz;
+  int fd;
+
+  uint64_t rate_limit_per_thread;
+  int threads;
+  struct rte_ring* ring;
+  struct mt_rx_socket_thread threads_data[MT_DP_SOCKET_THREADS_MAX];
+  bool stat_registered;
+};
+
+struct mt_tx_xdp_entry {
+  struct mtl_main_impl* parent;
+  enum mtl_port port;
+  struct mt_txq_flow flow;
+  uint16_t queue_id;
+  struct mt_xdp_queue* xq;
+};
+
+struct mt_rx_xdp_entry {
+  struct mtl_main_impl* parent;
+  enum mtl_port port;
+  struct mt_rxq_flow flow;
+  uint16_t queue_id;
+  struct mt_xdp_queue* xq;
+  struct mt_rx_flow_rsp* flow_rsp;
+  bool skip_udp_port_check;
+  bool skip_all_check;
+  int mcast_fd;
+};
+
+struct mt_flow_impl {
+  pthread_mutex_t mutex; /* protect mt_rx_flow_create */
+};
+
+struct mt_dp_impl {
+  /* the shared tx sys queue */
+  struct mt_txq_entry* txq_sys_entry;
+  rte_spinlock_t txq_sys_entry_lock; /* protect txq_sys_entry */
 };
 
 struct mtl_main_impl {
@@ -833,6 +1122,10 @@ struct mtl_main_impl {
   enum rte_iova_mode iova_mode; /* current IOVA mode */
   size_t page_size;
 
+  /* flow */
+  struct mt_flow_impl* flow[MTL_PORT_MAX];
+  /* data path queue mgr */
+  struct mt_dp_impl* dp[MTL_PORT_MAX];
   /* rss */
   struct mt_rss_impl* rss[MTL_PORT_MAX];
   struct mt_srss_impl* srss[MTL_PORT_MAX];
@@ -841,10 +1134,6 @@ struct mtl_main_impl {
   struct mt_tsq_impl* tsq[MTL_PORT_MAX];
 
   /* stat */
-  pthread_t stat_tid;
-  pthread_cond_t stat_wake_cond;
-  pthread_mutex_t stat_wake_mutex;
-  rte_atomic32_t stat_stop;
   struct mt_stat_mgr stat_mgr;
 
   /* dev context */
@@ -852,7 +1141,7 @@ struct mtl_main_impl {
   rte_atomic32_t instance_in_reset; /* if mt instance is in reset */
   /* if mt instance is aborted, in case for ctrl-c from app */
   rte_atomic32_t instance_aborted;
-  struct mt_sch_impl* main_sch; /* system sch */
+  struct mtl_sch_impl* main_sch; /* system sch */
 
   /* admin context */
   struct mt_admin admin;
@@ -873,6 +1162,7 @@ struct mtl_main_impl {
 
   /* sch context */
   struct mt_sch_mgr sch_mgr;
+  uint32_t sch_schedule_ns;
   uint32_t tasklets_nb_per_sch;
   uint32_t tx_audio_sessions_max_per_sch;
   uint32_t rx_audio_sessions_max_per_sch;
@@ -880,16 +1170,9 @@ struct mtl_main_impl {
   /* st plugin dev mgr */
   struct st_plugin_mgr plugin_mgr;
 
-  void* mudp_rxq_mgr[MTL_PORT_MAX];
+  struct mt_user_info u_info;
 
-  /* ancillary(st_40) context */
-  struct st_tx_ancillary_sessions_mgr tx_anc_mgr;
-  struct st_ancillary_transmitter_impl anc_trs;
-  struct st_rx_ancillary_sessions_mgr rx_anc_mgr;
-  bool tx_anc_init;
-  pthread_mutex_t tx_anc_mgr_mutex; /* protect tx_anc_mgr */
-  bool rx_anc_init;
-  pthread_mutex_t rx_anc_mgr_mutex; /* protect rx_anc_mgr */
+  void* mudp_rxq_mgr[MTL_PORT_MAX];
 
   /* cnt for open sessions */
   rte_atomic32_t st20_tx_sessions_cnt;
@@ -903,11 +1186,6 @@ struct mtl_main_impl {
   /* active lcore cnt */
   rte_atomic32_t lcore_cnt;
 
-  struct mt_lcore_shm* lcore_shm;
-  int lcore_shm_id;
-  int lcore_lock_fd;
-  bool local_lcores_active[RTE_MAX_LCORE]; /* local lcores active map */
-
   /* rx timestamp register */
   int dynfield_offset;
 
@@ -917,11 +1195,25 @@ struct mtl_main_impl {
 
   uint16_t pkt_udp_suggest_max_size;
   uint16_t rx_pool_data_size;
-  uint32_t sch_schedule_ns;
+  int mempool_idx;
+
+  int arp_timeout_ms;
+  bool privileged; /* if app running with root privilege */
+
+  /* connect to mtl manager */
+  int instance_fd;
 };
 
 static inline struct mtl_init_params* mt_get_user_params(struct mtl_main_impl* impl) {
   return &impl->user_para;
+}
+
+static inline bool mt_is_privileged(struct mtl_main_impl* impl) {
+  return impl->privileged;
+}
+
+static inline bool mt_is_manager_connected(struct mtl_main_impl* impl) {
+  return impl->instance_fd > 0;
 }
 
 static inline struct mt_interface* mt_if(struct mtl_main_impl* impl, enum mtl_port port) {
@@ -939,31 +1231,109 @@ static inline struct rte_device* mt_port_device(struct mtl_main_impl* impl,
 
 static inline enum mt_port_type mt_port_type(struct mtl_main_impl* impl,
                                              enum mtl_port port) {
-  return mt_if(impl, port)->port_type;
+  return mt_if(impl, port)->drv_info.port_type;
 }
 
 enum mtl_port mt_port_by_id(struct mtl_main_impl* impl, uint16_t port_id);
-
 uint8_t* mt_sip_addr(struct mtl_main_impl* impl, enum mtl_port port);
-
 uint8_t* mt_sip_netmask(struct mtl_main_impl* impl, enum mtl_port port);
-
 uint8_t* mt_sip_gateway(struct mtl_main_impl* impl, enum mtl_port port);
+int mt_dst_ip_mac(struct mtl_main_impl* impl, uint8_t dip[MTL_IP_ADDR_LEN],
+                  struct rte_ether_addr* ea, enum mtl_port port, int timeout_ms);
 
 static inline enum mtl_pmd_type mt_pmd_type(struct mtl_main_impl* impl,
                                             enum mtl_port port) {
   return mt_get_user_params(impl)->pmd[port];
 }
 
-static inline bool mt_pmd_is_kernel(struct mtl_main_impl* impl, enum mtl_port port) {
+static inline bool mt_pmd_is_dpdk_user(struct mtl_main_impl* impl, enum mtl_port port) {
+  if (MTL_PMD_DPDK_USER == mt_get_user_params(impl)->pmd[port])
+    return true;
+  else
+    return false;
+}
+
+static inline bool mt_pmd_is_kernel_based(struct mtl_main_impl* impl,
+                                          enum mtl_port port) {
   if (MTL_PMD_DPDK_USER == mt_get_user_params(impl)->pmd[port])
     return false;
   else
     return true;
 }
 
-static inline bool mt_pmd_is_af_xdp(struct mtl_main_impl* impl, enum mtl_port port) {
+static inline bool mt_drv_use_kernel_ctl(struct mtl_main_impl* impl, enum mtl_port port) {
+  if (mt_if(impl, port)->drv_info.flags & MT_DRV_F_USE_KERNEL_CTL)
+    return true;
+  else
+    return false;
+}
+
+static inline bool mt_drv_dpdk_based(struct mtl_main_impl* impl, enum mtl_port port) {
+  if (mt_if(impl, port)->drv_info.flags & MT_DRV_F_NOT_DPDK_PMD)
+    return false;
+  else
+    return true;
+}
+
+static inline bool mt_drv_mcast_in_dp(struct mtl_main_impl* impl, enum mtl_port port) {
+  if (mt_if(impl, port)->drv_info.flags & MT_DRV_F_MCAST_IN_DP)
+    return true;
+  else
+    return false;
+}
+
+static inline const char* mt_kernel_if_name(struct mtl_main_impl* impl,
+                                            enum mtl_port port) {
+  return impl->kport_info.kernel_if[port];
+}
+
+static inline bool mt_drv_no_cni(struct mtl_main_impl* impl, enum mtl_port port) {
+  if (mt_if(impl, port)->drv_info.flags & MT_DRV_F_NO_CNI)
+    return true;
+  else
+    return false;
+}
+
+static inline bool mt_drv_no_sys_txq(struct mtl_main_impl* impl, enum mtl_port port) {
+  if (mt_if(impl, port)->drv_info.flags & MT_DRV_F_NO_SYS_TX_QUEUE)
+    return true;
+  else
+    return false;
+}
+
+static inline bool mt_drv_kernel_based(struct mtl_main_impl* impl, enum mtl_port port) {
+  if (mt_if(impl, port)->drv_info.flags & MT_DRV_F_KERNEL_BASED)
+    return true;
+  else
+    return false;
+}
+
+static inline bool mt_pmd_is_dpdk_af_xdp(struct mtl_main_impl* impl, enum mtl_port port) {
   if (MTL_PMD_DPDK_AF_XDP == mt_get_user_params(impl)->pmd[port])
+    return true;
+  else
+    return false;
+}
+
+static inline bool mt_pmd_is_dpdk_af_packet(struct mtl_main_impl* impl,
+                                            enum mtl_port port) {
+  if (MTL_PMD_DPDK_AF_PACKET == mt_get_user_params(impl)->pmd[port])
+    return true;
+  else
+    return false;
+}
+
+static inline bool mt_pmd_is_kernel_socket(struct mtl_main_impl* impl,
+                                           enum mtl_port port) {
+  if (MTL_PMD_KERNEL_SOCKET == mt_get_user_params(impl)->pmd[port])
+    return true;
+  else
+    return false;
+}
+
+static inline bool mt_pmd_is_native_af_xdp(struct mtl_main_impl* impl,
+                                           enum mtl_port port) {
+  if (MTL_PMD_NATIVE_AF_XDP == mt_get_user_params(impl)->pmd[port])
     return true;
   else
     return false;
@@ -975,181 +1345,231 @@ static inline int mt_num_ports(struct mtl_main_impl* impl) {
 
 bool mt_is_valid_socket(struct mtl_main_impl* impl, int soc_id);
 
-static inline uint8_t mt_start_queue(struct mtl_main_impl* impl, enum mtl_port port) {
+static inline uint8_t mt_afxdp_start_queue(struct mtl_main_impl* impl,
+                                           enum mtl_port port) {
   return impl->user_para.xdp_info[port].start_queue;
 }
 
-static inline bool mt_has_ptp_service(struct mtl_main_impl* impl) {
+/* if user enable the phc2sys service */
+static inline bool mt_user_phc2sys_service(struct mtl_main_impl* impl) {
+  if (mt_get_user_params(impl)->flags & MTL_FLAG_PHC2SYS_ENABLE)
+    return true;
+  else
+    return false;
+}
+
+/* if user enable the ptp service */
+static inline bool mt_user_ptp_service(struct mtl_main_impl* impl) {
   if (mt_get_user_params(impl)->flags & MTL_FLAG_PTP_ENABLE)
     return true;
   else
     return false;
 }
 
-static inline bool mt_has_auto_start_stop(struct mtl_main_impl* impl) {
+/* if user enable the auto start/stop */
+static inline bool mt_user_auto_start_stop(struct mtl_main_impl* impl) {
   if (mt_get_user_params(impl)->flags & MTL_FLAG_DEV_AUTO_START_STOP)
     return true;
   else
     return false;
 }
 
-static inline bool mt_has_af_xdp_zc(struct mtl_main_impl* impl) {
+/* if user disable the af xdp zc */
+static inline bool mt_user_af_xdp_zc(struct mtl_main_impl* impl) {
   if (mt_get_user_params(impl)->flags & MTL_FLAG_AF_XDP_ZC_DISABLE)
     return false;
   else
     return true;
 }
 
-static inline bool mt_has_user_ptp(struct mtl_main_impl* impl) {
+/* if user enable the ptp time source func */
+static inline bool mt_user_ptp_time_fn(struct mtl_main_impl* impl) {
   if (mt_get_user_params(impl)->ptp_get_time_fn)
     return true;
   else
     return false;
 }
 
-static inline bool mt_has_user_quota(struct mtl_main_impl* impl) {
+/* if user has customized sch quota */
+static inline bool mt_user_quota_active(struct mtl_main_impl* impl) {
   if (mt_get_user_params(impl)->data_quota_mbs_per_sch)
     return true;
   else
     return false;
 }
 
-static inline bool mt_has_ebu(struct mtl_main_impl* impl) {
-  if (mt_get_user_params(impl)->flags & MTL_FLAG_RX_VIDEO_EBU)
+/* if user enable hw offload timestamp */
+static inline bool mt_user_hw_timestamp(struct mtl_main_impl* impl) {
+  if (mt_get_user_params(impl)->flags & MTL_FLAG_ENABLE_HW_TIMESTAMP)
     return true;
   else
     return false;
 }
 
-static inline bool mt_has_rxv_separate_sch(struct mtl_main_impl* impl) {
+/* if user enable separate sch for rx video session */
+static inline bool mt_user_rxv_separate_sch(struct mtl_main_impl* impl) {
   if (mt_get_user_params(impl)->flags & MTL_FLAG_RX_SEPARATE_VIDEO_LCORE)
     return true;
   else
     return false;
 }
 
-static inline bool mt_has_tx_video_migrate(struct mtl_main_impl* impl) {
+/* if user enable tx video migrate feature */
+static inline bool mt_user_tx_video_migrate(struct mtl_main_impl* impl) {
   if (mt_get_user_params(impl)->flags & MTL_FLAG_TX_VIDEO_MIGRATE)
     return true;
   else
     return false;
 }
 
-static inline bool mt_has_rx_video_migrate(struct mtl_main_impl* impl) {
+/* if user enable rx video migrate feature */
+static inline bool mt_user_rx_video_migrate(struct mtl_main_impl* impl) {
   if (mt_get_user_params(impl)->flags & MTL_FLAG_RX_VIDEO_MIGRATE)
     return true;
   else
     return false;
 }
 
-static inline bool mt_has_tasklet_time_measure(struct mtl_main_impl* impl) {
+/* if user enable tasklet time measure */
+static inline bool mt_user_tasklet_time_measure(struct mtl_main_impl* impl) {
   if (mt_get_user_params(impl)->flags & MTL_FLAG_TASKLET_TIME_MEASURE)
     return true;
   else
     return false;
 }
 
-static inline bool mt_has_rx_mono_pool(struct mtl_main_impl* impl) {
+/* if user enable rx mono pool */
+static inline bool mt_user_rx_mono_pool(struct mtl_main_impl* impl) {
   if (mt_get_user_params(impl)->flags & MTL_FLAG_RX_MONO_POOL)
     return true;
   else
     return false;
 }
 
-static inline bool mt_has_tx_mono_pool(struct mtl_main_impl* impl) {
+/* if user enable tx mono pool */
+static inline bool mt_user_tx_mono_pool(struct mtl_main_impl* impl) {
   if (mt_get_user_params(impl)->flags & MTL_FLAG_TX_MONO_POOL)
     return true;
   else
     return false;
 }
 
-static inline bool mt_has_tx_no_chain(struct mtl_main_impl* impl) {
+/* if user force tx to no chain mode */
+static inline bool mt_user_tx_no_chain(struct mtl_main_impl* impl) {
   if (mt_get_user_params(impl)->flags & MTL_FLAG_TX_NO_CHAIN)
     return true;
   else
     return false;
 }
 
-static inline enum mtl_rss_mode mt_get_rss_mode(struct mtl_main_impl* impl,
-                                                enum mtl_port port) {
-  return mt_if(impl, port)->rss_mode;
-}
-
-static inline bool mt_has_srss(struct mtl_main_impl* impl, enum mtl_port port) {
-  return mt_get_rss_mode(impl, port) != MTL_RSS_MODE_NONE;
-}
-
-static inline bool mt_udp_transport(struct mtl_main_impl* impl, enum mtl_port port) {
-  if (mt_get_user_params(impl)->transport == MTL_TRANSPORT_UDP)
+static inline bool mt_has_cni(struct mtl_main_impl* impl, enum mtl_port port) {
+  if (impl->cni.entries[port].rxq)
     return true;
   else
     return false;
 }
 
-static inline bool mt_udp_lcore(struct mtl_main_impl* impl, enum mtl_port port) {
+static inline bool mt_has_cni_rx(struct mtl_main_impl* impl, enum mtl_port port) {
+  if ((mt_get_user_params(impl)->flags & MTL_FLAG_RX_USE_CNI) && mt_has_cni(impl, port))
+    return true;
+  else
+    return false;
+}
+
+static inline bool mt_has_virtio_user(struct mtl_main_impl* impl, enum mtl_port port) {
+  if ((mt_get_user_params(impl)->flags & MTL_FLAG_VIRTIO_USER) &&
+      mt_pmd_is_dpdk_user(impl, port))
+    return true;
+  else
+    return false;
+}
+
+static inline bool mt_dhcp_service_active(struct mtl_main_impl* impl,
+                                          enum mtl_port port) {
+  if ((mt_if(impl, port)->net_proto == MTL_PROTO_DHCP) && impl->dhcp[port])
+    return true;
+  else
+    return false;
+}
+
+static inline enum mtl_rss_mode mt_if_rss_mode(struct mtl_main_impl* impl,
+                                               enum mtl_port port) {
+  return mt_if(impl, port)->rss_mode;
+}
+
+static inline bool mt_has_srss(struct mtl_main_impl* impl, enum mtl_port port) {
+  return mt_if_rss_mode(impl, port) != MTL_RSS_MODE_NONE;
+}
+
+/* if user enable udp lcore mode */
+static inline bool mt_user_udp_lcore(struct mtl_main_impl* impl, enum mtl_port port) {
+  MTL_MAY_UNUSED(port);
   if (mt_get_user_params(impl)->flags & MTL_FLAG_UDP_LCORE)
     return true;
   else
     return false;
 }
 
-static inline bool mt_random_src_port(struct mtl_main_impl* impl) {
+/* if user enable random src port */
+static inline bool mt_user_random_src_port(struct mtl_main_impl* impl) {
   if (mt_get_user_params(impl)->flags & MTL_FLAG_RANDOM_SRC_PORT)
     return true;
   else
     return false;
 }
 
-static inline bool mt_multi_src_port(struct mtl_main_impl* impl) {
+/* if user enable multi src port */
+static inline bool mt_user_multi_src_port(struct mtl_main_impl* impl) {
   if (mt_get_user_params(impl)->flags & MTL_FLAG_MULTI_SRC_PORT)
     return true;
   else
     return false;
 }
 
-static inline bool mt_st2110_transport(struct mtl_main_impl* impl, enum mtl_port port) {
-  if (mt_get_user_params(impl)->transport == MTL_TRANSPORT_ST2110)
-    return true;
-  else
-    return false;
-}
-
-static inline bool mt_shared_tx_queue(struct mtl_main_impl* impl, enum mtl_port port) {
+/* if user enable shared tx queue */
+static inline bool mt_user_shared_txq(struct mtl_main_impl* impl, enum mtl_port port) {
+  MTL_MAY_UNUSED(port);
   if (mt_get_user_params(impl)->flags & MTL_FLAG_SHARED_TX_QUEUE)
     return true;
   else
     return false;
 }
 
-static inline bool mt_shared_rx_queue(struct mtl_main_impl* impl, enum mtl_port port) {
+/* if user enable shared rx queue */
+static inline bool mt_user_shared_rxq(struct mtl_main_impl* impl, enum mtl_port port) {
+  MTL_MAY_UNUSED(port);
   if (mt_get_user_params(impl)->flags & MTL_FLAG_SHARED_RX_QUEUE)
     return true;
   else
     return false;
 }
 
-static inline bool mt_no_system_rxq(struct mtl_main_impl* impl) {
+/* if user disable system rx queue */
+static inline bool mt_user_no_system_rxq(struct mtl_main_impl* impl) {
   if (mt_get_user_params(impl)->flags & MTL_FLAG_DISABLE_SYSTEM_RX_QUEUES)
     return true;
   else
     return false;
 }
 
-static inline bool mt_ptp_tsc_source(struct mtl_main_impl* impl) {
+/* if user enable ptp tsc source */
+static inline bool mt_user_ptp_tsc_source(struct mtl_main_impl* impl) {
   if (mt_get_user_params(impl)->flags & MTL_FLAG_PTP_SOURCE_TSC)
     return true;
   else
     return false;
 }
 
-static inline bool mt_tasklet_has_thread(struct mtl_main_impl* impl) {
+/* if user enable tasklet thread */
+static inline bool mt_user_tasklet_thread(struct mtl_main_impl* impl) {
   if (mt_get_user_params(impl)->flags & MTL_FLAG_TASKLET_THREAD)
     return true;
   else
     return false;
 }
 
-static inline bool mt_tasklet_has_sleep(struct mtl_main_impl* impl) {
+/* if user enable tasklet sleep */
+static inline bool mt_user_tasklet_sleep(struct mtl_main_impl* impl) {
   if (mt_get_user_params(impl)->flags & MTL_FLAG_TASKLET_SLEEP)
     return true;
   else
@@ -1158,6 +1578,14 @@ static inline bool mt_tasklet_has_sleep(struct mtl_main_impl* impl) {
 
 static inline bool mt_if_has_timesync(struct mtl_main_impl* impl, enum mtl_port port) {
   if (mt_if(impl, port)->feature & MT_IF_FEATURE_TIMESYNC)
+    return true;
+  else
+    return false;
+}
+
+static inline bool mt_if_has_offload_timestamp(struct mtl_main_impl* impl,
+                                               enum mtl_port port) {
+  if (mt_if(impl, port)->feature & MT_IF_FEATURE_RX_OFFLOAD_TIMESTAMP)
     return true;
   else
     return false;
@@ -1190,13 +1618,6 @@ static inline struct rte_mempool* mt_if_hdr_split_pool(struct mt_interface* inf,
   return inf->rx_queues[q].mbuf_payload_pool;
 }
 
-static inline bool mt_if_has_ptp(struct mtl_main_impl* impl, enum mtl_port port) {
-  if (mt_has_ptp_service(impl) && mt_if_has_timesync(impl, port))
-    return true;
-  else
-    return false;
-}
-
 static inline uint16_t mt_if_nb_tx_desc(struct mtl_main_impl* impl, enum mtl_port port) {
   return mt_if(impl, port)->nb_tx_desc;
 }
@@ -1208,9 +1629,9 @@ static inline uint16_t mt_if_nb_rx_desc(struct mtl_main_impl* impl, enum mtl_por
 static inline uint16_t mt_if_nb_tx_burst(struct mtl_main_impl* impl, enum mtl_port port) {
   uint16_t burst_pkts;
 
-  if (mt_pmd_is_af_xdp(impl, port)) {
+  if (mt_pmd_is_dpdk_af_xdp(impl, port)) {
     /* same umem for both tx and rx */
-    burst_pkts = mt_if_nb_rx_desc(impl, port);
+    burst_pkts = RTE_MAX(mt_if_nb_rx_desc(impl, port), mt_if_nb_tx_desc(impl, port));
   } else {
     burst_pkts = mt_if_nb_tx_desc(impl, port);
   }
@@ -1247,12 +1668,12 @@ static inline uint32_t mt_sch_schedule_ns(struct mtl_main_impl* impl) {
   return impl->sch_schedule_ns;
 }
 
-static inline struct rte_mempool* mt_get_tx_mempool(struct mtl_main_impl* impl,
+static inline struct rte_mempool* mt_sys_tx_mempool(struct mtl_main_impl* impl,
                                                     enum mtl_port port) {
   return mt_if(impl, port)->tx_mbuf_pool;
 }
 
-static inline struct rte_mempool* mt_get_rx_mempool(struct mtl_main_impl* impl,
+static inline struct rte_mempool* mt_sys_rx_mempool(struct mtl_main_impl* impl,
                                                     enum mtl_port port) {
   return mt_if(impl, port)->rx_mbuf_pool;
 }
@@ -1378,6 +1799,16 @@ static inline uint32_t st_tx_mbuf_get_idx(struct rte_mbuf* mbuf) {
   return priv->tx_priv.idx;
 }
 
+static inline void st_tx_mbuf_set_priv(struct rte_mbuf* mbuf, void* p) {
+  struct mt_muf_priv_data* priv = rte_mbuf_to_priv(mbuf);
+  priv->tx_priv.priv = p;
+}
+
+static inline void* st_tx_mbuf_get_priv(struct rte_mbuf* mbuf) {
+  struct mt_muf_priv_data* priv = rte_mbuf_to_priv(mbuf);
+  return priv->tx_priv.priv;
+}
+
 static inline void st_rx_mbuf_set_lender(struct rte_mbuf* mbuf, uint32_t lender) {
   struct mt_muf_priv_data* priv = rte_mbuf_to_priv(mbuf);
   priv->rx_priv.lender = lender;
@@ -1408,12 +1839,22 @@ static inline uint32_t st_rx_mbuf_get_len(struct rte_mbuf* mbuf) {
   return priv->rx_priv.len;
 }
 
-uint64_t mt_mbuf_hw_time_stamp(struct mtl_main_impl* impl, struct rte_mbuf* mbuf,
-                               enum mtl_port port);
+#ifdef ST_PCAPNG_ENABLED
+struct rte_mbuf* mt_pcapng_copy(struct mtl_main_impl* impl, enum mtl_port port,
+                                struct mt_rxq_entry* rxq, const struct rte_mbuf* m,
+                                struct rte_mempool* mp, uint32_t length,
+                                uint64_t timestamp, uint64_t tm_ns,
+                                enum rte_pcapng_direction direction);
+#endif
+
+uint64_t mt_mbuf_time_stamp(struct mtl_main_impl* impl, struct rte_mbuf* mbuf,
+                            enum mtl_port port);
 
 static inline uint64_t mt_get_ptp_time(struct mtl_main_impl* impl, enum mtl_port port) {
   return mt_if(impl, port)->ptp_get_time_fn(impl, port);
 }
+
+int mt_ptp_wait_stable(struct mtl_main_impl* impl, enum mtl_port port, int timeout_ms);
 
 uint64_t mt_get_raw_ptp_time(struct mtl_main_impl* impl, enum mtl_port port);
 
@@ -1448,5 +1889,16 @@ static inline json_object* mt_json_object_get(json_object* obj, const char* key)
   return NULL;
 }
 #endif
+
+static inline bool mt_spinlock_lock_timeout(struct mtl_main_impl* impl,
+                                            rte_spinlock_t* lock, int timeout_us) {
+  uint64_t time = mt_get_tsc(impl);
+  uint64_t end = time + timeout_us * NS_PER_US;
+  while (time < end) {
+    if (rte_spinlock_trylock(lock)) return true;
+    time = mt_get_tsc(impl);
+  }
+  return false; /* timeout */
+}
 
 #endif

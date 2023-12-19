@@ -5,8 +5,8 @@
 #ifndef _MT_LIB_UDP_RXQ_H_
 #define _MT_LIB_UDP_RXQ_H_
 
+#include "../datapath/mt_queue.h"
 #include "../mt_main.h"
-#include "../mt_queue.h"
 #include "../mt_sch.h"
 #include "../mt_util.h"
 
@@ -103,11 +103,6 @@ static inline int mur_client_set_wake_thresh(struct mur_client* c, unsigned int 
 
 static inline int mur_client_set_wake_timeout(struct mur_client* c, unsigned int us) {
   c->wake_timeout_us = us;
-  return 0;
-}
-
-static inline int mur_client_set_reuse(struct mur_client* c, int reuse) {
-  // c->reuse_port = reuse;
   return 0;
 }
 

@@ -145,7 +145,7 @@ static void rx_get_packet(void* args) {
       }
       if (i >= TEST_SHA_HIST_NUM) {
         test_sha_dump("st30_rx_error_sha", result);
-        ctx->fail_cnt++;
+        ctx->sha_fail_cnt++;
       }
       ctx->check_sha_frame_cnt++;
     }
@@ -170,7 +170,7 @@ static int st30_rx_frame_ready(void* priv, void* frame, struct st30_rx_frame_met
     }
     if (i >= TEST_SHA_HIST_NUM) {
       test_sha_dump("st30_rx_error_sha", result);
-      ctx->fail_cnt++;
+      ctx->sha_fail_cnt++;
     }
     ctx->check_sha_frame_cnt++;
   }
@@ -188,12 +188,13 @@ static void st30_rx_ops_init(tests_context* st30, struct st30_rx_ops* ops) {
   ops->name = "st30_test";
   ops->priv = st30;
   ops->num_port = ctx->para.num_ports;
+  if (ctx->same_dual_port) ops->num_port = 1;
   memcpy(ops->sip_addr[MTL_PORT_P], ctx->mcast_ip_addr[MTL_PORT_P], MTL_IP_ADDR_LEN);
-  strncpy(ops->port[MTL_PORT_P], ctx->para.port[MTL_PORT_P], MTL_PORT_MAX_LEN);
+  snprintf(ops->port[MTL_PORT_P], MTL_PORT_MAX_LEN, "%s", ctx->para.port[MTL_PORT_P]);
   ops->udp_port[MTL_PORT_P] = 20000 + st30->idx;
   if (ops->num_port == 2) {
     memcpy(ops->sip_addr[MTL_PORT_R], ctx->mcast_ip_addr[MTL_PORT_R], MTL_IP_ADDR_LEN);
-    strncpy(ops->port[MTL_PORT_R], ctx->para.port[MTL_PORT_R], MTL_PORT_MAX_LEN);
+    snprintf(ops->port[MTL_PORT_R], MTL_PORT_MAX_LEN, "%s", ctx->para.port[MTL_PORT_R]);
     ops->udp_port[MTL_PORT_R] = 20000 + st30->idx;
   }
   ops->type = ST30_TYPE_FRAME_LEVEL;
@@ -202,10 +203,9 @@ static void st30_rx_ops_init(tests_context* st30, struct st30_rx_ops* ops) {
   ops->payload_type = ST30_TEST_PAYLOAD_TYPE;
   ops->sampling = ST30_SAMPLING_48K;
   ops->ptime = ST30_PTIME_1MS;
-  ops->sample_size = st30_get_sample_size(ops->fmt);
-  ops->sample_num = st30_get_sample_num(ops->ptime, ops->sampling);
   ops->framebuff_cnt = st30->fb_cnt;
-  ops->framebuff_size = ops->sample_size * ops->sample_num * ops->channel;
+  ops->framebuff_size =
+      st30_get_packet_size(ops->fmt, ops->ptime, ops->sampling, ops->channel);
   ops->notify_frame_ready = st30_rx_frame_ready;
   ops->notify_rtp_ready = rx_rtp_ready;
   ops->rtp_ring_size = 1024;
@@ -218,14 +218,17 @@ static void st30_tx_ops_init(tests_context* st30, struct st30_tx_ops* ops) {
   ops->name = "st30_test";
   ops->priv = st30;
   ops->num_port = ctx->para.num_ports;
+  if (ctx->same_dual_port) ops->num_port = 1;
   memcpy(ops->dip_addr[MTL_SESSION_PORT_P], ctx->mcast_ip_addr[MTL_PORT_P],
          MTL_IP_ADDR_LEN);
-  strncpy(ops->port[MTL_SESSION_PORT_P], ctx->para.port[MTL_PORT_P], MTL_PORT_MAX_LEN);
+  snprintf(ops->port[MTL_SESSION_PORT_P], MTL_PORT_MAX_LEN, "%s",
+           ctx->para.port[MTL_PORT_P]);
   ops->udp_port[MTL_SESSION_PORT_P] = 20000 + st30->idx;
   if (ops->num_port == 2) {
     memcpy(ops->dip_addr[MTL_SESSION_PORT_R], ctx->mcast_ip_addr[MTL_PORT_R],
            MTL_IP_ADDR_LEN);
-    strncpy(ops->port[MTL_SESSION_PORT_R], ctx->para.port[MTL_PORT_R], MTL_PORT_MAX_LEN);
+    snprintf(ops->port[MTL_SESSION_PORT_R], MTL_PORT_MAX_LEN, "%s",
+             ctx->para.port[MTL_PORT_R]);
     ops->udp_port[MTL_SESSION_PORT_R] = 20000 + st30->idx;
   }
   ops->type = ST30_TYPE_FRAME_LEVEL;
@@ -234,36 +237,35 @@ static void st30_tx_ops_init(tests_context* st30, struct st30_tx_ops* ops) {
   ops->payload_type = ST30_TEST_PAYLOAD_TYPE;
   ops->sampling = ST30_SAMPLING_48K;
   ops->ptime = ST30_PTIME_1MS;
-  ops->sample_size = st30_get_sample_size(ops->fmt);
-  ops->sample_num = st30_get_sample_num(ops->ptime, ops->sampling);
   ops->framebuff_cnt = st30->fb_cnt;
-  ops->framebuff_size = ops->sample_size * ops->sample_num * ops->channel;
+  st30->pkt_data_len =
+      st30_get_packet_size(ops->fmt, ops->ptime, ops->sampling, ops->channel);
+  ops->framebuff_size = st30->pkt_data_len;
   ops->get_next_frame = tx_audio_next_frame;
   ops->notify_rtp_done = tx_rtp_done;
   ops->rtp_ring_size = 1024;
-  st30->pkt_data_len = ops->sample_size * ops->sample_num * ops->channel;
 }
 
 static void st30_tx_assert_cnt(int expect_s30_tx_cnt) {
   auto ctx = st_test_ctx();
   auto handle = ctx->handle;
-  struct mtl_stats stats;
+  struct st_var_info var;
   int ret;
 
-  ret = mtl_get_stats(handle, &stats);
+  ret = st_get_var_info(handle, &var);
   EXPECT_GE(ret, 0);
-  EXPECT_EQ(stats.st30_tx_sessions_cnt, expect_s30_tx_cnt);
+  EXPECT_EQ(var.st30_tx_sessions_cnt, expect_s30_tx_cnt);
 }
 
 static void st30_rx_assert_cnt(int expect_s30_rx_cnt) {
   auto ctx = st_test_ctx();
   auto handle = ctx->handle;
-  struct mtl_stats stats;
+  struct st_var_info var;
   int ret;
 
-  ret = mtl_get_stats(handle, &stats);
+  ret = st_get_var_info(handle, &var);
   EXPECT_GE(ret, 0);
-  EXPECT_EQ(stats.st30_rx_sessions_cnt, expect_s30_rx_cnt);
+  EXPECT_EQ(var.st30_rx_sessions_cnt, expect_s30_rx_cnt);
 }
 
 TEST(St30_tx, create_free_single) { create_free_test(st30_tx, 0, 1, 1); }
@@ -313,6 +315,7 @@ static void st30_tx_fps_test(enum st30_type type[], enum st30_sampling sample[],
 
   std::vector<tests_context*> test_ctx;
   std::vector<st30_tx_handle> handle;
+  std::vector<double> expect_framerate;
   std::vector<double> framerate;
   std::vector<std::thread> rtp_thread;
 
@@ -321,11 +324,12 @@ static void st30_tx_fps_test(enum st30_type type[], enum st30_sampling sample[],
 
   test_ctx.resize(sessions);
   handle.resize(sessions);
-  double expect_framerate = 1000.0;
+  expect_framerate.resize(sessions);
   framerate.resize(sessions);
   rtp_thread.resize(sessions);
 
   for (int i = 0; i < sessions; i++) {
+    expect_framerate[i] = (double)NS_PER_S / st30_get_packet_time(ptime[i]);
     test_ctx[i] = new tests_context();
     ASSERT_TRUE(test_ctx[i] != NULL);
 
@@ -340,13 +344,10 @@ static void st30_tx_fps_test(enum st30_type type[], enum st30_sampling sample[],
     ops.fmt = fmt[i];
     ops.payload_type = ST30_TEST_PAYLOAD_TYPE;
     ops.ptime = ptime[i];
-    ops.sample_size = st30_get_sample_size(ops.fmt);
-    ops.sample_num = st30_get_sample_num(ops.ptime, ops.sampling);
-    ops.framebuff_size =
-        ops.sample_size * st30_get_sample_num(ST30_PTIME_1MS, ops.sampling) * ops.channel;
-    err("framebuff size %u, sample_size %u, sample_num %u, channel %u\n",
-        ops.framebuff_size, ops.sample_size, ops.sample_num, ops.channel);
-    test_ctx[i]->pkt_data_len = ops.sample_num * ops.sample_size * ops.channel;
+    ops.framebuff_size = st30_get_sample_size(ops.fmt) *
+                         st30_get_sample_num(ops.ptime, ops.sampling) * ops.channel;
+    test_ctx[i]->pkt_data_len =
+        st30_get_packet_size(ops.fmt, ops.ptime, ops.sampling, ops.channel);
 
     handle[i] = st30_tx_create(m_handle, &ops);
     ASSERT_TRUE(handle[i] != NULL);
@@ -365,7 +366,6 @@ static void st30_tx_fps_test(enum st30_type type[], enum st30_sampling sample[],
   for (int i = 0; i < sessions; i++) {
     uint64_t cur_time_ns = st_test_get_monotonic_time();
     double time_sec = (double)(cur_time_ns - test_ctx[i]->start_time) / NS_PER_S;
-    expect_framerate = 1000.0;
     framerate[i] = test_ctx[i]->fb_send / time_sec;
     test_ctx[i]->stop = true;
     if (type[i] == ST30_TYPE_RTP_LEVEL) {
@@ -383,7 +383,7 @@ static void st30_tx_fps_test(enum st30_type type[], enum st30_sampling sample[],
     EXPECT_GT(test_ctx[i]->fb_send, 0);
     info("%s, session %d fb_send %d framerate %f\n", __func__, i, test_ctx[i]->fb_send,
          framerate[i]);
-    EXPECT_NEAR(framerate[i], expect_framerate, expect_framerate * 0.1);
+    EXPECT_NEAR(framerate[i], expect_framerate[i], expect_framerate[i] * 0.1);
     ret = st30_tx_free(handle[i]);
     EXPECT_GE(ret, 0);
     delete test_ctx[i];
@@ -444,24 +444,24 @@ static void st30_rx_fps_test(enum st30_type type[], enum st30_sampling sample[],
     ops_tx.num_port = 1;
     memcpy(ops_tx.dip_addr[MTL_SESSION_PORT_P], ctx->para.sip_addr[MTL_PORT_R],
            MTL_IP_ADDR_LEN);
-    strncpy(ops_tx.port[MTL_SESSION_PORT_P], ctx->para.port[MTL_PORT_P],
-            MTL_PORT_MAX_LEN);
-    ops_tx.udp_port[MTL_SESSION_PORT_P] = 20000 + i;
+    snprintf(ops_tx.port[MTL_SESSION_PORT_P], MTL_PORT_MAX_LEN, "%s",
+             ctx->para.port[MTL_PORT_P]);
+    ops_tx.udp_port[MTL_SESSION_PORT_P] = 20000 + i * 2;
     ops_tx.type = type[i];
     ops_tx.sampling = sample[i];
     ops_tx.channel = channel[i];
     ops_tx.fmt = fmt[i];
     ops_tx.payload_type = ST30_TEST_PAYLOAD_TYPE;
+    ops_tx.ssrc = i ? i + 0x66666666 : 0;
     ops_tx.ptime = ptime[i];
-    ops_tx.sample_size = st30_get_sample_size(ops_tx.fmt);
-    ops_tx.sample_num = st30_get_sample_num(ops_tx.ptime, ops_tx.sampling);
-    ops_tx.framebuff_size = ops_tx.sample_size * ops_tx.sample_num * ops_tx.channel;
+    ops_tx.framebuff_size =
+        st30_get_packet_size(ops_tx.fmt, ops_tx.ptime, ops_tx.sampling, ops_tx.channel);
+    EXPECT_GE(ops_tx.framebuff_size, 0);
     ops_tx.framebuff_cnt = test_ctx_tx[i]->fb_cnt;
     ops_tx.get_next_frame = tx_audio_next_frame;
     ops_tx.notify_rtp_done = tx_rtp_done;
     ops_tx.rtp_ring_size = 1024;
-    test_ctx_tx[i]->pkt_data_len =
-        ops_tx.sample_size * ops_tx.sample_num * ops_tx.channel;
+    test_ctx_tx[i]->pkt_data_len = ops_tx.framebuff_size;
     tx_handle[i] = st30_tx_create(m_handle, &ops_tx);
     ASSERT_TRUE(tx_handle[i] != NULL);
 
@@ -506,18 +506,18 @@ static void st30_rx_fps_test(enum st30_type type[], enum st30_sampling sample[],
     ops_rx.num_port = 1;
     memcpy(ops_rx.sip_addr[MTL_SESSION_PORT_P], ctx->para.sip_addr[MTL_PORT_P],
            MTL_IP_ADDR_LEN);
-    strncpy(ops_rx.port[MTL_SESSION_PORT_P], ctx->para.port[MTL_PORT_R],
-            MTL_PORT_MAX_LEN);
-    ops_rx.udp_port[MTL_SESSION_PORT_P] = 20000 + i;
+    snprintf(ops_rx.port[MTL_SESSION_PORT_P], MTL_PORT_MAX_LEN, "%s",
+             ctx->para.port[MTL_PORT_R]);
+    ops_rx.udp_port[MTL_SESSION_PORT_P] = 20000 + i * 2;
     ops_rx.type = type[i];
     ops_rx.sampling = sample[i];
     ops_rx.channel = channel[i];
     ops_rx.fmt = fmt[i];
     ops_rx.payload_type = ST30_TEST_PAYLOAD_TYPE;
+    ops_rx.ssrc = i ? i + 0x66666666 : 0;
     ops_rx.ptime = ptime[i];
-    ops_rx.sample_size = st30_get_sample_size(ops_rx.fmt);
-    ops_rx.sample_num = st30_get_sample_num(ops_rx.ptime, ops_rx.sampling);
-    ops_rx.framebuff_size = ops_rx.sample_size * ops_rx.sample_num * ops_rx.channel;
+    ops_rx.framebuff_size =
+        st30_get_packet_size(ops_rx.fmt, ops_rx.ptime, ops_rx.sampling, ops_rx.channel);
     ops_rx.framebuff_cnt = test_ctx_rx[i]->fb_cnt;
     ops_rx.notify_frame_ready = st30_rx_frame_ready;
     ops_rx.notify_rtp_ready = rx_rtp_ready;
@@ -578,7 +578,7 @@ static void st30_rx_fps_test(enum st30_type type[], enum st30_sampling sample[],
   EXPECT_GE(ret, 0);
   for (int i = 0; i < sessions; i++) {
     EXPECT_GT(test_ctx_rx[i]->fb_rec, 0);
-    EXPECT_LE(test_ctx_rx[i]->fail_cnt, 2);
+    EXPECT_LE(test_ctx_rx[i]->sha_fail_cnt, 2);
     if (check_sha) {
       EXPECT_GT(test_ctx_rx[i]->check_sha_frame_cnt, 0);
     }
@@ -844,18 +844,17 @@ static void st30_rx_update_src_test(enum st30_type type, int tx_sessions,
     else
       memcpy(ops_tx.dip_addr[MTL_SESSION_PORT_P], ctx->para.sip_addr[MTL_PORT_R],
              MTL_IP_ADDR_LEN);
-    strncpy(ops_tx.port[MTL_SESSION_PORT_P], ctx->para.port[MTL_PORT_P],
-            MTL_PORT_MAX_LEN);
-    ops_tx.udp_port[MTL_SESSION_PORT_P] = 20000 + i;
+    snprintf(ops_tx.port[MTL_SESSION_PORT_P], MTL_PORT_MAX_LEN, "%s",
+             ctx->para.port[MTL_PORT_P]);
+    ops_tx.udp_port[MTL_SESSION_PORT_P] = 20000 + i * 2;
     ops_tx.type = type;
     ops_tx.sampling = ST30_SAMPLING_48K;
     ops_tx.channel = 2;
     ops_tx.fmt = ST30_FMT_PCM24;
     ops_tx.payload_type = ST30_TEST_PAYLOAD_TYPE;
     ops_tx.ptime = ST30_PTIME_1MS;
-    ops_tx.sample_size = st30_get_sample_size(ops_tx.fmt);
-    ops_tx.sample_num = st30_get_sample_num(ops_tx.ptime, ops_tx.sampling);
-    ops_tx.framebuff_size = ops_tx.sample_size * ops_tx.sample_num * ops_tx.channel;
+    ops_tx.framebuff_size =
+        st30_get_packet_size(ops_tx.fmt, ops_tx.ptime, ops_tx.sampling, ops_tx.channel);
     ops_tx.framebuff_cnt = test_ctx_tx[i]->fb_cnt;
     ops_tx.get_next_frame = tx_audio_next_frame;
     ops_tx.notify_rtp_done = tx_rtp_done;
@@ -886,18 +885,17 @@ static void st30_rx_update_src_test(enum st30_type type, int tx_sessions,
     ops_rx.num_port = 1;
     memcpy(ops_rx.sip_addr[MTL_SESSION_PORT_P], ctx->para.sip_addr[MTL_PORT_P],
            MTL_IP_ADDR_LEN);
-    strncpy(ops_rx.port[MTL_SESSION_PORT_P], ctx->para.port[MTL_PORT_R],
-            MTL_PORT_MAX_LEN);
-    ops_rx.udp_port[MTL_SESSION_PORT_P] = 20000 + i;
+    snprintf(ops_rx.port[MTL_SESSION_PORT_P], MTL_PORT_MAX_LEN, "%s",
+             ctx->para.port[MTL_PORT_R]);
+    ops_rx.udp_port[MTL_SESSION_PORT_P] = 20000 + i * 2;
     ops_rx.type = type;
     ops_rx.sampling = ST30_SAMPLING_48K;
     ops_rx.channel = 2;
     ops_rx.fmt = ST30_FMT_PCM24;
     ops_rx.payload_type = ST30_TEST_PAYLOAD_TYPE;
     ops_rx.ptime = ST30_PTIME_1MS;
-    ops_rx.sample_size = st30_get_sample_size(ops_rx.fmt);
-    ops_rx.sample_num = st30_get_sample_num(ops_rx.ptime, ops_rx.sampling);
-    ops_rx.framebuff_size = ops_rx.sample_size * ops_rx.sample_num * ops_rx.channel;
+    ops_rx.framebuff_size =
+        st30_get_packet_size(ops_rx.fmt, ops_rx.ptime, ops_rx.sampling, ops_rx.channel);
     ops_rx.framebuff_cnt = test_ctx_rx[i]->fb_cnt;
     ops_rx.notify_frame_ready = st30_rx_frame_ready;
     ops_rx.notify_rtp_ready = rx_rtp_ready;
@@ -920,14 +918,14 @@ static void st30_rx_update_src_test(enum st30_type type, int tx_sessions,
   struct st_rx_source_info src;
   /* switch to mcast port p(tx_session:1) */
   memset(&src, 0, sizeof(src));
-  src.udp_port[MTL_SESSION_PORT_P] = 20000 + 1;
+  src.udp_port[MTL_SESSION_PORT_P] = 20000 + 2;
   memcpy(src.sip_addr[MTL_SESSION_PORT_P], ctx->mcast_ip_addr[MTL_PORT_P],
          MTL_IP_ADDR_LEN);
   if (tx_update_dst) {
     test_ctx_tx[0]->seq_id = 0; /* reset seq id */
     struct st_tx_dest_info dst;
     memset(&dst, 0, sizeof(dst));
-    dst.udp_port[MTL_SESSION_PORT_P] = 20000 + 1;
+    dst.udp_port[MTL_SESSION_PORT_P] = 20000 + 2;
     memcpy(dst.dip_addr[MTL_SESSION_PORT_P], ctx->mcast_ip_addr[MTL_PORT_P],
            MTL_IP_ADDR_LEN);
     ret = st30_tx_update_destination(tx_handle[0], &dst);
@@ -1075,10 +1073,10 @@ static int st30_rx_meta_frame_ready(void* priv, void* frame,
 
   ctx->fb_rec++;
   if (!ctx->start_time) ctx->start_time = st_test_get_monotonic_time();
-  if (expect_meta->sampling != meta->sampling) ctx->fail_cnt++;
-  if (expect_meta->channel != meta->channel) ctx->fail_cnt++;
-  if (expect_meta->fmt != meta->fmt) ctx->fail_cnt++;
-  if (expect_meta->timestamp == meta->timestamp) ctx->fail_cnt++;
+  if (expect_meta->sampling != meta->sampling) ctx->rx_meta_fail_cnt++;
+  if (expect_meta->channel != meta->channel) ctx->rx_meta_fail_cnt++;
+  if (expect_meta->fmt != meta->fmt) ctx->rx_meta_fail_cnt++;
+  if (expect_meta->timestamp == meta->timestamp) ctx->rx_meta_fail_cnt++;
   expect_meta->timestamp = meta->timestamp;
 
   st30_rx_put_framebuff((st30_rx_handle)ctx->handle, frame);
@@ -1131,18 +1129,18 @@ static void st30_rx_meta_test(enum st30_fmt fmt[], enum st30_sampling sampling[]
     ops_tx.num_port = 1;
     memcpy(ops_tx.dip_addr[MTL_SESSION_PORT_P], ctx->para.sip_addr[MTL_PORT_R],
            MTL_IP_ADDR_LEN);
-    strncpy(ops_tx.port[MTL_SESSION_PORT_P], ctx->para.port[MTL_PORT_P],
-            MTL_PORT_MAX_LEN);
-    ops_tx.udp_port[MTL_SESSION_PORT_P] = 20000 + i;
+    snprintf(ops_tx.port[MTL_SESSION_PORT_P], MTL_PORT_MAX_LEN, "%s",
+             ctx->para.port[MTL_PORT_P]);
+    ops_tx.udp_port[MTL_SESSION_PORT_P] = 20000 + i * 2;
     ops_tx.type = ST30_TYPE_FRAME_LEVEL;
     ops_tx.sampling = sampling[i];
     ops_tx.channel = channel[i];
     ops_tx.fmt = fmt[i];
     ops_tx.payload_type = ST30_TEST_PAYLOAD_TYPE;
     ops_tx.ptime = ST30_PTIME_1MS;
-    ops_tx.sample_size = st30_get_sample_size(ops_tx.fmt);
-    ops_tx.sample_num = st30_get_sample_num(ops_tx.ptime, ops_tx.sampling);
-    ops_tx.framebuff_size = ops_tx.sample_size * ops_tx.sample_num * ops_tx.channel;
+    ops_tx.framebuff_size =
+        st30_get_packet_size(ops_tx.fmt, ops_tx.ptime, ops_tx.sampling, ops_tx.channel);
+    ;
     ops_tx.framebuff_cnt = test_ctx_tx[i]->fb_cnt;
     if (user_timestamp) {
       ops_tx.get_next_frame = tx_audio_next_frame_timestamp;
@@ -1152,8 +1150,7 @@ static void st30_rx_meta_test(enum st30_fmt fmt[], enum st30_sampling sampling[]
     }
     ops_tx.notify_rtp_done = tx_rtp_done;
     ops_tx.rtp_ring_size = 1024;
-    test_ctx_tx[i]->pkt_data_len =
-        ops_tx.sample_size * ops_tx.sample_num * ops_tx.channel;
+    test_ctx_tx[i]->pkt_data_len = ops_tx.framebuff_size;
     test_ctx_tx[i]->frame_time = st30_get_packet_time(ops_tx.ptime);
     tx_handle[i] = st30_tx_create(m_handle, &ops_tx);
     ASSERT_TRUE(tx_handle[i] != NULL);
@@ -1177,18 +1174,17 @@ static void st30_rx_meta_test(enum st30_fmt fmt[], enum st30_sampling sampling[]
     ops_rx.num_port = 1;
     memcpy(ops_rx.sip_addr[MTL_SESSION_PORT_P], ctx->para.sip_addr[MTL_PORT_P],
            MTL_IP_ADDR_LEN);
-    strncpy(ops_rx.port[MTL_SESSION_PORT_P], ctx->para.port[MTL_PORT_R],
-            MTL_PORT_MAX_LEN);
-    ops_rx.udp_port[MTL_SESSION_PORT_P] = 20000 + i;
+    snprintf(ops_rx.port[MTL_SESSION_PORT_P], MTL_PORT_MAX_LEN, "%s",
+             ctx->para.port[MTL_PORT_R]);
+    ops_rx.udp_port[MTL_SESSION_PORT_P] = 20000 + i * 2;
     ops_rx.type = ST30_TYPE_FRAME_LEVEL;
     ops_rx.sampling = sampling[i];
     ops_rx.channel = channel[i];
     ops_rx.fmt = fmt[i];
     ops_rx.payload_type = ST30_TEST_PAYLOAD_TYPE;
     ops_rx.ptime = ST30_PTIME_1MS;
-    ops_rx.sample_size = st30_get_sample_size(ops_rx.fmt);
-    ops_rx.sample_num = st30_get_sample_num(ops_rx.ptime, ops_rx.sampling);
-    ops_rx.framebuff_size = ops_rx.sample_size * ops_rx.sample_num * ops_rx.channel;
+    ops_rx.framebuff_size =
+        st30_get_packet_size(ops_rx.fmt, ops_rx.ptime, ops_rx.sampling, ops_rx.channel);
     ops_rx.framebuff_cnt = test_ctx_rx[i]->fb_cnt;
     ops_rx.notify_frame_ready = st30_rx_meta_frame_ready;
     ops_rx.notify_rtp_ready = rx_rtp_ready;
@@ -1235,8 +1231,9 @@ static void st30_rx_meta_test(enum st30_fmt fmt[], enum st30_sampling sampling[]
   for (int i = 0; i < sessions; i++) {
     EXPECT_GT(test_ctx_rx[i]->fb_rec, 0);
     info("%s, session %d fb_rec %d fail %d framerate %f, fb send %d\n", __func__, i,
-         test_ctx_rx[i]->fb_rec, test_ctx_rx[i]->fail_cnt, framerate[i],
+         test_ctx_rx[i]->fb_rec, test_ctx_rx[i]->rx_meta_fail_cnt, framerate[i],
          test_ctx_tx[i]->fb_send);
+    EXPECT_LE(test_ctx_rx[i]->rx_meta_fail_cnt, 2);
     EXPECT_NEAR(framerate[i], expect_framerate, expect_framerate * 0.1);
     ret = st30_tx_free(tx_handle[i]);
     EXPECT_GE(ret, 0);
@@ -1315,24 +1312,22 @@ static void st30_create_after_start_test(enum st30_type type[],
       ops_tx.num_port = 1;
       memcpy(ops_tx.dip_addr[MTL_SESSION_PORT_P], ctx->para.sip_addr[MTL_PORT_R],
              MTL_IP_ADDR_LEN);
-      strncpy(ops_tx.port[MTL_SESSION_PORT_P], ctx->para.port[MTL_PORT_P],
-              MTL_PORT_MAX_LEN);
-      ops_tx.udp_port[MTL_SESSION_PORT_P] = 20000 + i;
+      snprintf(ops_tx.port[MTL_SESSION_PORT_P], MTL_PORT_MAX_LEN, "%s",
+               ctx->para.port[MTL_PORT_P]);
+      ops_tx.udp_port[MTL_SESSION_PORT_P] = 20000 + i * 2;
       ops_tx.type = type[i];
       ops_tx.sampling = sample[i];
       ops_tx.channel = channel[i];
       ops_tx.fmt = fmt[i];
       ops_tx.payload_type = ST30_TEST_PAYLOAD_TYPE;
       ops_tx.ptime = ST30_PTIME_1MS;
-      ops_tx.sample_size = st30_get_sample_size(ops_tx.fmt);
-      ops_tx.sample_num = st30_get_sample_num(ops_tx.ptime, ops_tx.sampling);
-      ops_tx.framebuff_size = ops_tx.sample_size * ops_tx.sample_num * ops_tx.channel;
+      ops_tx.framebuff_size =
+          st30_get_packet_size(ops_tx.fmt, ops_tx.ptime, ops_tx.sampling, ops_tx.channel);
       ops_tx.framebuff_cnt = test_ctx_tx[i]->fb_cnt;
       ops_tx.get_next_frame = tx_audio_next_frame;
       ops_tx.notify_rtp_done = tx_rtp_done;
       ops_tx.rtp_ring_size = 1024;
-      test_ctx_tx[i]->pkt_data_len =
-          ops_tx.sample_size * ops_tx.sample_num * ops_tx.channel;
+      test_ctx_tx[i]->pkt_data_len = ops_tx.framebuff_size;
       tx_handle[i] = st30_tx_create(m_handle, &ops_tx);
       ASSERT_TRUE(tx_handle[i] != NULL);
 
@@ -1358,18 +1353,17 @@ static void st30_create_after_start_test(enum st30_type type[],
       ops_rx.num_port = 1;
       memcpy(ops_rx.sip_addr[MTL_SESSION_PORT_P], ctx->para.sip_addr[MTL_PORT_P],
              MTL_IP_ADDR_LEN);
-      strncpy(ops_rx.port[MTL_SESSION_PORT_P], ctx->para.port[MTL_PORT_R],
-              MTL_PORT_MAX_LEN);
-      ops_rx.udp_port[MTL_SESSION_PORT_P] = 20000 + i;
+      snprintf(ops_rx.port[MTL_SESSION_PORT_P], MTL_PORT_MAX_LEN, "%s",
+               ctx->para.port[MTL_PORT_R]);
+      ops_rx.udp_port[MTL_SESSION_PORT_P] = 20000 + i * 2;
       ops_rx.type = type[i];
       ops_rx.sampling = sample[i];
       ops_rx.channel = channel[i];
       ops_rx.fmt = fmt[i];
       ops_rx.payload_type = ST30_TEST_PAYLOAD_TYPE;
       ops_rx.ptime = ST30_PTIME_1MS;
-      ops_rx.sample_size = st30_get_sample_size(ops_rx.fmt);
-      ops_rx.sample_num = st30_get_sample_num(ops_rx.ptime, ops_rx.sampling);
-      ops_rx.framebuff_size = ops_rx.sample_size * ops_rx.sample_num * ops_rx.channel;
+      ops_rx.framebuff_size =
+          st30_get_packet_size(ops_rx.fmt, ops_rx.ptime, ops_rx.sampling, ops_rx.channel);
       ops_rx.framebuff_cnt = test_ctx_rx[i]->fb_cnt;
       ops_rx.notify_frame_ready = st30_rx_frame_ready;
       ops_rx.notify_rtp_ready = rx_rtp_ready;

@@ -555,6 +555,15 @@ int st_frame_sanity_check(struct st_frame* frame) {
           frame->data_size, frame->buffer_size);
       return -EINVAL;
     }
+
+    /* check data size is enough */
+    size_t least_sz =
+        st_frame_size(frame->fmt, frame->width, frame->height, frame->interlaced);
+    if (frame->data_size < least_sz) {
+      err("%s, frame data size %" PRIu64 " small then frame least_sz %" PRIu64 "\n",
+          __func__, frame->data_size, least_sz);
+      return -EINVAL;
+    }
   }
 
   return 0;
@@ -775,11 +784,6 @@ uint64_t st10_media_clk_to_ns(uint32_t media_ts, uint32_t sampling_rate) {
   return ts;
 }
 
-enum mtl_pmd_type mtl_pmd_by_port_name(const char* port) {
-  char* bdf = strstr(port, ":");
-  return bdf ? MTL_PMD_DPDK_USER : MTL_PMD_DPDK_AF_XDP;
-}
-
 int st_draw_logo(struct st_frame* frame, struct st_frame* logo, uint32_t x, uint32_t y) {
   if (frame->fmt != logo->fmt) {
     err("%s, mismatch fmt %d %d\n", __func__, frame->fmt, logo->fmt);
@@ -890,6 +894,15 @@ double st30_get_packet_time(enum st30_ptime ptime) {
     case ST31_PTIME_80US:
       packet_time_ns = (double)1000000000.0 * 1 / 12500;
       break;
+    case ST31_PTIME_1_09MS:
+      packet_time_ns = (double)1000000000.0 * 48 / 44100;
+      break;
+    case ST31_PTIME_0_14MS:
+      packet_time_ns = (double)1000000000.0 * 6 / 44100;
+      break;
+    case ST31_PTIME_0_09MS:
+      packet_time_ns = (double)1000000000.0 * 4 / 44100;
+      break;
     default:
       err("%s, wrong ptime %d\n", __func__, ptime);
       return -EINVAL;
@@ -943,7 +956,7 @@ int st30_get_sample_num(enum st30_ptime ptime, enum st30_sampling sampling) {
           samples = 4;
           break;
         default:
-          err("%s, wrong ptime %d\n", __func__, ptime);
+          err("%s, wrong ptime %d for 48k\n", __func__, ptime);
           return -EINVAL;
       }
       break;
@@ -968,7 +981,7 @@ int st30_get_sample_num(enum st30_ptime ptime, enum st30_sampling sampling) {
           samples = 8;
           break;
         default:
-          err("%s, wrong ptime %d\n", __func__, ptime);
+          err("%s, wrong ptime %d for 96k\n", __func__, ptime);
           return -EINVAL;
       }
       break;
@@ -984,7 +997,7 @@ int st30_get_sample_num(enum st30_ptime ptime, enum st30_sampling sampling) {
           samples = 4;
           break;
         default:
-          err("%s, wrong ptime %d\n", __func__, ptime);
+          err("%s, wrong ptime %d for 44k\n", __func__, ptime);
           return -EINVAL;
       }
       break;
@@ -1009,6 +1022,28 @@ int st30_get_sample_rate(enum st30_sampling sampling) {
   }
 }
 
+int st30_get_packet_size(enum st30_fmt fmt, enum st30_ptime ptime,
+                         enum st30_sampling sampling, uint16_t channel) {
+  int ret;
+  int sample_size;
+  int sample_num;
+
+  ret = st30_get_sample_size(fmt);
+  if (ret < 0) return ret;
+  sample_size = ret;
+
+  ret = st30_get_sample_num(ptime, sampling);
+  if (ret < 0) return ret;
+  sample_num = ret;
+
+  if (!channel) {
+    err("%s, invalid channel %u\n", __func__, channel);
+    return -EINVAL;
+  }
+
+  return sample_size * sample_num * channel;
+}
+
 void st_frame_init_plane_single_src(struct st_frame* frame, void* addr, mtl_iova_t iova) {
   uint8_t planes = st_frame_fmt_planes(frame->fmt);
 
@@ -1018,12 +1053,54 @@ void st_frame_init_plane_single_src(struct st_frame* frame, void* addr, mtl_iova
       frame->addr[plane] = addr;
       frame->iova[plane] = iova;
     } else {
-      frame->addr[plane] =
-          frame->addr[plane - 1] + frame->linesize[plane - 1] * frame->height;
-      frame->iova[plane] =
-          frame->iova[plane - 1] + frame->linesize[plane - 1] * frame->height;
+      frame->addr[plane] = frame->addr[plane - 1] +
+                           frame->linesize[plane - 1] * st_frame_data_height(frame);
+      frame->iova[plane] = frame->iova[plane - 1] +
+                           frame->linesize[plane - 1] * st_frame_data_height(frame);
     }
   }
+}
+
+struct st_frame* st_frame_create(mtl_handle mt, enum st_frame_fmt fmt, uint32_t w,
+                                 uint32_t h, bool interlaced) {
+  struct mtl_main_impl* impl = mt;
+  int soc_id = mt_socket_id(impl, MTL_PORT_P);
+  struct st_frame* frame = mt_rte_zmalloc_socket(sizeof(*frame), soc_id);
+  if (!frame) {
+    err("%s, frame malloc fail\n", __func__);
+    return NULL;
+  }
+  frame->fmt = fmt;
+  frame->interlaced = interlaced;
+  frame->width = w;
+  frame->height = h;
+  frame->flags = ST_FRAME_FLAG_SINGLE_MALLOC | ST_FRAME_FLAG_RTE_MALLOC;
+
+  size_t data_sz = st_frame_size(fmt, w, h, interlaced);
+  void* data = mt_rte_zmalloc_socket(data_sz, soc_id);
+  if (!data) {
+    err("%s, data malloc fail, size %" PRIu64 "\n", __func__, data_sz);
+    st_frame_free(frame);
+    return NULL;
+  }
+  frame->buffer_size = data_sz;
+  frame->data_size = data_sz;
+  /* init plane */
+  st_frame_init_plane_single_src(frame, data, mtl_hp_virt2iova(impl, data));
+  return frame;
+}
+
+int st_frame_free(struct st_frame* frame) {
+  uint32_t reqiured_flags = ST_FRAME_FLAG_SINGLE_MALLOC | ST_FRAME_FLAG_RTE_MALLOC;
+  if (reqiured_flags != (frame->flags & reqiured_flags)) {
+    err("%s, frame %p is not created by st_frame_create\n", __func__, frame);
+    return -EINVAL;
+  }
+  if (frame->addr[0]) {
+    mt_rte_free(frame->addr[0]);
+  }
+  mt_rte_free(frame);
+  return 0;
 }
 
 /* the reference rl pad interval table for CVL NIC */
@@ -1140,9 +1217,13 @@ static const struct cvl_pad_table g_cvl_static_pad_tables[] = {
     },
 };
 
-uint16_t st20_pacing_static_profiling(struct st_tx_video_session_impl* s) {
+uint16_t st20_pacing_static_profiling(struct mtl_main_impl* impl,
+                                      struct st_tx_video_session_impl* s,
+                                      enum mtl_session_port s_port) {
   const struct cvl_pad_table* refer;
   struct st20_tx_ops* ops = &s->ops;
+  MTL_MAY_UNUSED(impl);
+  MTL_MAY_UNUSED(s_port);
 
   if (s->s_type == MT_ST22_HANDLE_TX_VIDEO) return 0; /* no for st22 */
 
@@ -1157,4 +1238,15 @@ uint16_t st20_pacing_static_profiling(struct st_tx_video_session_impl* s) {
   }
 
   return 0; /* not found */
+}
+
+int st_rxp_para_port_set(struct st_rx_port* p, enum mtl_session_port port, char* name) {
+  return snprintf(p->port[port], MTL_PORT_MAX_LEN, "%s", name);
+}
+
+int st_rxp_para_sip_set(struct st_rx_port* p, enum mtl_port port, char* ip) {
+  int ret = inet_pton(AF_INET, ip, p->sip_addr[port]);
+  if (ret == 1) return 0;
+  err("%s, fail to inet_pton for %s\n", __func__, ip);
+  return -EIO;
 }
