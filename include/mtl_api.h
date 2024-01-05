@@ -180,13 +180,30 @@ enum mtl_session_port {
  * Log level type to MTL context
  */
 enum mtl_log_level {
-  MTL_LOG_LEVEL_DEBUG = 0, /**< debug log level */
-  MTL_LOG_LEVEL_INFO,      /**< info log level */
-  MTL_LOG_LEVEL_NOTICE,    /**< notice log level */
-  MTL_LOG_LEVEL_WARNING,   /**< warning log level */
-  MTL_LOG_LEVEL_ERROR,     /**< error log level */
-  MTL_LOG_LEVEL_MAX,       /**< max value of this enum */
+  /** debug log level */
+  MTL_LOG_LEVEL_DEBUG = 0,
+  /** info log level */
+  MTL_LOG_LEVEL_INFO,
+  /** notice log level */
+  MTL_LOG_LEVEL_NOTICE,
+  /** warning log level */
+  MTL_LOG_LEVEL_WARNING,
+  /** error log level */
+  MTL_LOG_LEVEL_ERR,
+  /** critical log level */
+  MTL_LOG_LEVEL_CRIT,
+  /** max value of this enum */
+  MTL_LOG_LEVEL_MAX,
 };
+
+/* keep compatibility for MTL_LOG_LEVEL_ERR */
+#define MTL_LOG_LEVEL_ERROR (MTL_LOG_LEVEL_ERR)
+
+/* log formatter */
+typedef void (*mtl_log_prefix_formatter_t)(char* buf, size_t buf_sz);
+
+/* log printer, similar to printf */
+typedef void (*mtl_log_printer_t)(enum mtl_log_level level, const char* format, ...);
 
 /**
  * Poll mode driver type
@@ -593,6 +610,8 @@ struct mtl_init_params {
    * some NICs may need this to avoid mbuf split.
    */
   uint16_t rx_pool_data_size;
+  /** Optional. the maximum number of memzones in DPDK, leave zero to use default 2560 */
+  uint32_t memzone_max;
 
   /** Optional. The number of tasklets for each lcore, 0 means determined by lib */
   uint32_t tasklets_nb_per_sch;
@@ -755,6 +774,11 @@ static inline void mtl_para_pmd_set(struct mtl_init_params* p, enum mtl_port por
   p->pmd[port] = pmd;
 }
 
+/** Helper to get the port from struct mtl_init_params */
+static inline char* mtl_para_port_get(struct mtl_init_params* p, enum mtl_port port) {
+  return p->port[port];
+}
+
 /**
  * Inline function returning primary port pointer from mtl_init_params
  * @param p
@@ -762,7 +786,9 @@ static inline void mtl_para_pmd_set(struct mtl_init_params* p, enum mtl_port por
  * @return
  *     Primary port name pointer
  */
-static inline char* mtl_p_port(struct mtl_init_params* p) { return p->port[MTL_PORT_P]; }
+static inline char* mtl_p_port(struct mtl_init_params* p) {
+  return mtl_para_port_get(p, MTL_PORT_P);
+}
 
 /**
  * Inline function returning redundant port pointer from mtl_init_params
@@ -771,7 +797,9 @@ static inline char* mtl_p_port(struct mtl_init_params* p) { return p->port[MTL_P
  * @return
  *     Redundant port name pointer
  */
-static inline char* mtl_r_port(struct mtl_init_params* p) { return p->port[MTL_PORT_R]; }
+static inline char* mtl_r_port(struct mtl_init_params* p) {
+  return mtl_para_port_get(p, MTL_PORT_R);
+}
 
 /**
  * Inline helper function returning primary port source IP address pointer
@@ -896,13 +924,53 @@ enum mtl_log_level mtl_get_log_level(mtl_handle mt);
  *     strftime(buf, sz, "%Y-%m-%d %H:%M:%S, ", &tm);
  *   }
  *
- * @param log_prefix_format_func
- *   The log level define.
+ * @param f
+ *   The log formatter func.
  * @return
  *   - 0: Success.
  *   - <0: Error code.
  */
-int mtl_set_log_prefix_formatter(void (*log_prefix_formatter)(char* buf, size_t buf_sz));
+int mtl_set_log_prefix_formatter(mtl_log_prefix_formatter_t f);
+
+/**
+ * Set up a custom log printer for the user. By default, MTL uses `RTE_LOG` for outputting
+ * logs. However, applications can register a customized log printer using this function.
+ * Whenever MTL needs to log anything, the registered log callback will be invoked.
+ *
+ * A example printer is like below:
+ * static void log_user_printer(enum mtl_log_level level, const char* format, ...) {
+ *   MTL_MAY_UNUSED(level);
+ *   va_list args;
+ *
+ *   // Init variadic argument list
+ *   va_start(args, format);
+ *   // Use vprintf to pass the variadic arguments to printf
+ *   vprintf(format, args);
+ *   // End variadic argument list
+ *   va_end(args);
+ * }
+ *
+ * @param mtl_log_printer_t
+ *   The user log printer.
+ * @return
+ *   - 0: Success.
+ *   - <0: Error code.
+ */
+int mtl_set_log_printer(mtl_log_printer_t f);
+
+/**
+ * Change the stream that will be used by the logging system.
+ *
+ * The FILE* f argument represents the stream to be used for logging.
+ * If f is NULL, the default output is used. This can be done at any time.
+ *
+ * @param f
+ *   Pointer to the FILE stream.
+ * @return
+ *   - 0: Success.
+ *   - <0: Error code.
+ */
+int mtl_openlog_stream(FILE* f);
 
 /**
  * Enable or disable sleep mode for sch.
@@ -1419,20 +1487,6 @@ int mtl_get_if_ip(char* if_name, uint8_t ip[MTL_IP_ADDR_LEN],
                   uint8_t netmask[MTL_IP_ADDR_LEN]);
 
 /**
- * Change the stream that will be used by the logging system.
- *
- * The FILE* f argument represents the stream to be used for logging.
- * If f is NULL, the default output is used. This can be done at any time.
- *
- * @param f
- *   Pointer to the FILE stream.
- * @return
- *   - 0: Success.
- *   - <0: Error code.
- */
-int mtl_openlog_stream(FILE* f);
-
-/**
  * Set thread names.
  * @param tid
  *   Thread id.
@@ -1457,6 +1511,18 @@ int mtl_thread_setname(pthread_t tid, const char* name);
 static inline size_t mtl_size_page_align(size_t sz, size_t pg_sz) {
   if (sz % pg_sz) sz += pg_sz - (sz % pg_sz);
   return sz;
+}
+
+/** Helper struct to perform mtl_memcpy with mtl_cpuva_t */
+struct mtl_memcpy_ops {
+  mtl_cpuva_t dst;
+  mtl_cpuva_t src;
+  size_t sz;
+};
+/** Helper function to perform mtl_memcpy with mtl_cpuva_t */
+static inline int mtl_memcpy_action(struct mtl_memcpy_ops* ops) {
+  mtl_memcpy((void*)ops->dst, (const void*)ops->src, ops->sz);
+  return 0;
 }
 
 #if defined(__cplusplus)

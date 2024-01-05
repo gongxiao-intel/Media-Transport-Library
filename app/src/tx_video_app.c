@@ -790,18 +790,18 @@ static int app_tx_video_init(struct st_app_context* ctx, st_json_video_session_t
   if (ctx->tx_ts_epoch) ops.flags |= ST20_TX_FLAG_RTP_TIMESTAMP_EPOCH;
   if (ctx->tx_no_bulk) ops.flags |= ST20_TX_FLAG_DISABLE_BULK;
 
-  struct st_tx_rtcp_ops ops_rtcp;
-  memset(&ops_rtcp, 0, sizeof(ops_rtcp));
   if (video && video->enable_rtcp) {
     ops.flags |= ST20_TX_FLAG_ENABLE_RTCP;
-    ops_rtcp.rtcp_buffer_size = 1024;
-    ops.rtcp = &ops_rtcp;
+    ops.rtcp.buffer_size = 1024;
   }
 
   ret = st20_get_pgroup(ops.fmt, &s->st20_pg);
   if (ret < 0) return ret;
   s->width = ops.width;
   s->height = ops.height;
+  if (ops.interlaced) {
+    s->height >>= 1;
+  }
   s->interlaced = ops.interlaced ? true : false;
   s->num_port = ops.num_port;
   memcpy(s->st20_source_url, video ? video->info.video_url : ctx->tx_video_url,
@@ -879,7 +879,7 @@ static int app_tx_video_init(struct st_app_context* ctx, st_json_video_session_t
     return ret;
   }
 
-  if (ctx->has_sdl && video && video->display) {
+  if ((video && video->display) || ctx->tx_display) {
     struct st_display* d = st_app_zmalloc(sizeof(struct st_display));
     ret = st_app_init_display(d, name, s->width, s->height, ctx->ttf_file);
     if (ret < 0) {

@@ -4,9 +4,23 @@ IMTL leverage SWIG, found at <https://github.com/swig/swig/tree/master>, to tran
 
 Before using the Python binding, please ensure that IMTL is [built](../doc/build.md) and the NIC is [set up](../doc/run.md) correctly.
 
-## 1. Build and install swig
+## 1. Installation of SWIG Dependency
 
-Following the build and installation guide from the SWIG GitHub repository at <https://github.com/swig/swig/tree/master>.
+It is recommended to install the SWIG dependency from your operating system's software repository.
+
+For Ubuntu:
+
+```bash
+sudo apt-get install swig
+```
+
+For Centos:
+
+```bash
+sudo yum install swig
+```
+
+If you encounter issues installing SWIG through your operating system's package manager, follow the build and installation guide from the SWIG GitHub repository at <https://github.com/swig/swig/tree/master>.
 
 Below are the example steps to build the `v4.1.1` release. Replace the tag with a newer one if there is a more recent release of SWIG available:
 
@@ -14,7 +28,6 @@ Below are the example steps to build the `v4.1.1` release. Replace the tag with 
 git clone https://github.com/swig/swig.git
 cd swig/
 git checkout v4.1.1
-git log
 ./autogen.sh
 ./configure
 make
@@ -59,9 +72,43 @@ Extracting pymtl-0.1-py3.10-linux-x86_64.egg to /usr/local/lib/python3.10/dist-p
 
 ## 3. Run python example code
 
+Install `opencv-python` dependency:
+
 ```bash
-cd $imtl_source_code/
-python3 python/example/version.py
-# Customize the port and IP in the code before using
-python3 python/example/st20p_rx.py
+# for yuv display
+sudo pip3 install opencv-python
+# PyAv for video decode/encode
+sudo pip3 install av
+```
+
+### 3.1 st20p_rx.py
+
+Execute the `st20p_rx.py` to receive a ST2110 ST_FRAME_FMT_YUV422RFC4175PG2BE10 stream and display it.
+
+```bash
+python3 python/example/st20p_rx.py --p_port 0000:ac:01.1 --p_sip 192.168.108.102 --p_rx_ip 239.168.85.20
+```
+
+### 3.2 st20p_tx.py
+
+Run the `st20p_tx.py`, which reads YUV video data from a file(default: yuv422p10le_1080p.yuv) and transmits it over the network as a ST2110 ST_FRAME_FMT_YUV422RFC4175PG2BE10 stream.
+
+```bash
+python3 python/example/st20p_tx.py --p_port 0000:ac:01.0 --p_sip 192.168.108.101 --p_tx_ip 239.168.85.20
+```
+
+### 3.3 st20p_rx_encode.py
+
+Run the `st20p_rx_encode.py` to receive a ST2110 ST_FRAME_FMT_YUV422RFC4175PG2BE10 stream and encode it to a `.mp4` encoder file.
+
+```bash
+python3 python/example/st20p_rx_encode.py --p_port 0000:ac:01.1 --p_sip 192.168.108.102 --p_rx_ip 239.168.85.20
+```
+
+### 3.4 st20p_tx_decode.py
+
+Use `st20p_tx_decode.py` to decode YUV video from an encoded file `jellyfish-3-mbps-hd-hevc-10bit.mkv` and transmit it as a ST2110 ST_FRAME_FMT_YUV422RFC4175PG2BE10 stream across the network.
+
+```bash
+python3 python/example/st20p_tx_decode.py --p_port 0000:ac:01.0 --p_sip 192.168.108.101 --p_tx_ip 239.168.85.20
 ```

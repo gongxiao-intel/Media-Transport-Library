@@ -41,11 +41,15 @@ static int tx_next_video_frame_timestamp(void* priv, uint16_t* next_frame_idx,
 
   if (!ctx->handle) return -EIO; /* not ready */
 
+  if (!ctx->ptp_time_first_frame) {
+    ctx->ptp_time_first_frame = mtl_ptp_read_time(ctx->ctx->handle);
+  }
+
   *next_frame_idx = ctx->fb_idx;
 
   if (ctx->user_pacing) {
     meta->tfmt = ST10_TIMESTAMP_FMT_TAI;
-    meta->timestamp = mtl_ptp_read_time(ctx->ctx->handle) + 25 * 1000 * 1000;
+    meta->timestamp = ctx->ptp_time_first_frame + ctx->frame_time * ctx->fb_send * 2;
   } else if (ctx->user_timestamp) {
     meta->tfmt = ST10_TIMESTAMP_FMT_MEDIA_CLK;
     meta->timestamp = ctx->fb_send;
@@ -1886,12 +1890,9 @@ static void st20_rx_digest_test(enum st20_type tx_type[], enum st20_type rx_type
     if (tx_type[i] == ST20_TYPE_RTP_LEVEL) {
       rtp_tx_specific_init(&ops_tx, test_ctx_tx[i]);
     }
-    struct st_tx_rtcp_ops ops_tx_rtcp;
-    memset(&ops_tx_rtcp, 0, sizeof(ops_tx_rtcp));
     if (enable_rtcp) {
       ops_tx.flags |= ST20_TX_FLAG_ENABLE_RTCP;
-      ops_tx_rtcp.rtcp_buffer_size = 1024;
-      ops_tx.rtcp = &ops_tx_rtcp;
+      ops_tx.rtcp.buffer_size = 1024;
     }
 
     // out of order
@@ -1979,16 +1980,13 @@ static void st20_rx_digest_test(enum st20_type tx_type[], enum st20_type rx_type
     ops_rx.rtp_ring_size = 1024 * 2;
     ops_rx.flags = ST20_RX_FLAG_DMA_OFFLOAD;
     if (hdr_split) ops_rx.flags |= ST20_RX_FLAG_HDR_SPLIT;
-    struct st_rx_rtcp_ops ops_rx_rtcp;
-    memset(&ops_rx_rtcp, 0, sizeof(ops_rx_rtcp));
     if (enable_rtcp) {
       ops_rx.flags |= ST20_RX_FLAG_ENABLE_RTCP | ST20_RX_FLAG_SIMULATE_PKT_LOSS;
-      ops_rx_rtcp.nack_interval_us = 250;
-      ops_rx_rtcp.seq_bitmap_size = 32;
-      ops_rx_rtcp.seq_skip_window = 10;
-      ops_rx_rtcp.burst_loss_max = 32;
-      ops_rx_rtcp.sim_loss_rate = 0.0001;
-      ops_rx.rtcp = &ops_rx_rtcp;
+      ops_rx.rtcp.nack_interval_us = 250;
+      ops_rx.rtcp.seq_bitmap_size = 32;
+      ops_rx.rtcp.seq_skip_window = 10;
+      ops_rx.rtcp.burst_loss_max = 32;
+      ops_rx.rtcp.sim_loss_rate = 0.0001;
     }
 
     if (rx_type[i] == ST20_TYPE_SLICE_LEVEL) {
@@ -4280,6 +4278,7 @@ static void st20_tx_user_pacing_test(int width[], int height[], enum st20_fmt fm
     test_ctx_tx[i]->check_sha = true;
     test_ctx_tx[i]->user_pacing = user_pacing[i];
     test_ctx_tx[i]->user_timestamp = user_timestamp[i];
+    test_ctx_tx[i]->frame_time = (double)NS_PER_S / st_frame_rate(fps);
 
     memset(&ops_tx, 0, sizeof(ops_tx));
     ops_tx.name = "st20_timestamp_test";

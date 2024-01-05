@@ -199,6 +199,8 @@ static int dev_inf_get_stat_dpdk(struct mt_interface* inf) {
   stat_update_dpdk(stats_sum, &stats, drv_type);
   struct mtl_port_status* port_stats = &inf->user_stats_port;
   stat_update_dpdk(port_stats, &stats, drv_type);
+  struct mtl_port_status* stats_admin = &inf->stats_admin;
+  stat_update_dpdk(stats_admin, &stats, drv_type);
 
   if (!dev_stats_not_reset) {
     dbg("%s(%d), reset eth status\n", __func__, port);
@@ -229,6 +231,9 @@ static int dev_inf_get_stat_sw(struct mt_interface* inf) {
   stat_update_sw(stats_sum, stats);
   struct mtl_port_status* port_stats = &inf->user_stats_port;
   stat_update_sw(port_stats, stats);
+  struct mtl_port_status* stats_admin = &inf->stats_admin;
+  stat_update_sw(stats_admin, stats);
+
   memset(stats, 0, sizeof(*stats));
 
   rte_spinlock_unlock(&inf->stats_lock);
@@ -428,12 +433,16 @@ static int dev_eal_init(struct mtl_init_params* p, struct mt_kport_info* kport_i
     argv[argc] = "notice";
   } else if (p->log_level == MTL_LOG_LEVEL_WARNING) {
     argv[argc] = "warning";
-  } else if (p->log_level == MTL_LOG_LEVEL_ERROR) {
+  } else if (p->log_level == MTL_LOG_LEVEL_ERR) {
     argv[argc] = "error";
+  } else if (p->log_level == MTL_LOG_LEVEL_CRIT) {
+    argv[argc] = "crit";
   } else {
-    argv[argc] = "info";
+    err("%s, unknown log level %d\n", __func__, p->log_level);
+    return -EINVAL;
   }
   argc++;
+  mt_set_log_global_level(p->log_level);
 
   if (p->flags & MTL_FLAG_RXTX_SIMD_512) {
     argv[argc] = "--force-max-simd-bitwidth=512";
@@ -1934,6 +1943,14 @@ int mt_dev_get_socket_id(const char* port) {
 int mt_dev_init(struct mtl_init_params* p, struct mt_kport_info* kport_info) {
   int ret;
 
+#if RTE_VERSION >= RTE_VERSION_NUM(23, 7, 0, 0) /* introduce from 23.07 */
+  if (p->memzone_max) {
+    rte_memzone_max_set(p->memzone_max);
+    info("%s, user preferred memzone_max %u, now %" PRIu64 "\n", __func__, p->memzone_max,
+         rte_memzone_max_get());
+  }
+#endif
+
   ret = dev_eal_init(p, kport_info);
   if (ret < 0) {
     err("%s, dev_eal_init fail %d\n", __func__, ret);
@@ -2370,6 +2387,38 @@ int mt_dev_tsc_done_action(struct mtl_main_impl* impl) {
     inf->tsc_time_base = mt_get_tsc(impl);
   }
 
+  return 0;
+}
+
+int mt_update_admin_port_stats(struct mtl_main_impl* impl) {
+  int num_ports = mt_num_ports(impl);
+
+  for (int port = 0; port < num_ports; port++) {
+    struct mt_interface* inf = mt_if(impl, port);
+    dev_inf_get_stat(inf);
+  }
+  return 0;
+}
+
+int mt_reset_admin_port_stats(struct mtl_main_impl* impl) {
+  int num_ports = mt_num_ports(impl);
+
+  for (int port = 0; port < num_ports; port++) {
+    struct mt_interface* inf = mt_if(impl, port);
+    memset(&inf->stats_admin, 0, sizeof(inf->stats_admin));
+  }
+  return 0;
+}
+
+int mt_read_admin_port_stats(struct mtl_main_impl* impl, enum mtl_port port,
+                             struct mtl_port_status* stats) {
+  if (port >= mt_num_ports(impl)) {
+    err("%s, invalid port %d\n", __func__, port);
+    return -EIO;
+  }
+
+  struct mt_interface* inf = mt_if(impl, port);
+  memcpy(stats, &inf->stats_admin, sizeof(*stats));
   return 0;
 }
 

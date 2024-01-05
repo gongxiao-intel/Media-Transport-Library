@@ -427,8 +427,8 @@ static int app_rx_video_detected(void* priv, const struct st20_detect_meta* meta
 static int app_rx_video_uinit(struct st_app_rx_video_session* s) {
   int ret, idx = s->idx;
 
-  st_app_uinit_display(s->display);
   if (s->display) {
+    st_app_uinit_display(s->display);
     st_app_free(s->display);
   }
 
@@ -558,12 +558,9 @@ static int app_rx_video_init(struct st_app_context* ctx, st_json_video_session_t
     s->slice = false;
   }
   if (ctx->enable_hdr_split) ops.flags |= ST20_RX_FLAG_HDR_SPLIT;
-  struct st_rx_rtcp_ops ops_rtcp;
-  memset(&ops_rtcp, 0, sizeof(ops_rtcp));
   if (video && video->enable_rtcp) {
     ops.flags |= ST20_RX_FLAG_ENABLE_RTCP;
-    ops_rtcp.nack_interval_us = 250;
-    ops.rtcp = &ops_rtcp;
+    ops.rtcp.nack_interval_us = 250;
   }
   if (ctx->enable_timing_parser) ops.flags |= ST20_RX_FLAG_ENABLE_TIMING_PARSER;
 
@@ -608,11 +605,12 @@ static int app_rx_video_init(struct st_app_context* ctx, st_json_video_session_t
     s->framebuffs[j].frame = NULL;
   }
 
-  if (ctx->has_sdl && video && video->display) {
+  if ((video && video->display) || ctx->rx_display) {
     struct st_display* d = st_app_zmalloc(sizeof(struct st_display));
     ret = st_app_init_display(d, name, s->width, s->height, ctx->ttf_file);
     if (ret < 0) {
       err("%s(%d), st_app_init_display fail %d\n", __func__, idx, ret);
+      st_app_free(d);
       app_rx_video_uinit(s);
       return -EIO;
     }

@@ -377,6 +377,9 @@ enum st22p_tx_flag {
    * st22p_tx_put_ext_frame.
    */
   ST22P_TX_FLAG_EXT_FRAME = (MTL_BIT32(8)),
+  /** Enable the st22p_tx_get_frame block behavier to wait until a frame becomes
+   available or timeout(1s) */
+  ST22P_TX_FLAG_BLOCK_GET = (MTL_BIT32(15)),
 };
 
 /** Bit define for flags of struct st20p_tx_ops. */
@@ -431,6 +434,9 @@ enum st20p_tx_flag {
    * performance since the object enqueue/dequeue will be acted one by one.
    */
   ST20P_TX_FLAG_DISABLE_BULK = (MTL_BIT32(10)),
+  /** Enable the st20p_tx_get_frame block behavier to wait until a frame becomes
+     available or timeout(1s) */
+  ST20P_TX_FLAG_BLOCK_GET = (MTL_BIT32(15)),
 };
 
 /** Bit define for flags of struct st22p_rx_ops. */
@@ -459,6 +465,9 @@ enum st22p_rx_flag {
    */
   ST22P_RX_FLAG_EXT_FRAME = (MTL_BIT32(4)),
 
+  /** Enable the st22p_rx_get_frame block behavier to wait until a frame becomes
+     available or timeout(1s) */
+  ST22P_RX_FLAG_BLOCK_GET = (MTL_BIT32(15)),
   /**
    * If set, lib will pass the incomplete frame to app also.
    * User can check st_frame_status data for the frame integrity
@@ -500,6 +509,9 @@ enum st20p_rx_flag {
    */
   ST20P_RX_FLAG_SIMULATE_PKT_LOSS = (MTL_BIT32(5)),
 
+  /** Enable the st20p_rx_get_frame block behavier to wait until a frame becomes
+     available or timeout(1s) */
+  ST20P_RX_FLAG_BLOCK_GET = (MTL_BIT32(15)),
   /**
    * If set, lib will pass the incomplete frame to app also.
    * User can check st_frame_status data for the frame integrity
@@ -780,7 +792,7 @@ struct st20p_tx_ops {
   size_t transport_linesize;
 
   /** Optional for ST20P_TX_FLAG_ENABLE_RTCP. RTCP info */
-  struct st_tx_rtcp_ops* rtcp;
+  struct st_tx_rtcp_ops rtcp;
   /**
    * Optional. tx destination mac address.
    * Valid if ST20P_TX_FLAG_USER_P(R)_MAC is enabled
@@ -860,7 +872,7 @@ struct st20p_rx_ops {
   /** Optional. Array of external frames */
   struct st_ext_frame* ext_frames;
   /** Optional for ST20_RX_FLAG_ENABLE_RTCP. RTCP info */
-  struct st_rx_rtcp_ops* rtcp;
+  struct st_rx_rtcp_ops rtcp;
   /**
    * Optional. Callback when the lib query next external frame's data address.
    * And only non-block method can be used within this callback as it run from lcore
@@ -931,7 +943,7 @@ struct st22p_tx_ops {
   int (*notify_frame_done)(void* priv, struct st_frame* frame);
 
   /** Optional for ST22P_TX_FLAG_ENABLE_RTCP. RTCP info */
-  struct st_tx_rtcp_ops* rtcp;
+  struct st_tx_rtcp_ops rtcp;
   /**
    * Optional. tx destination mac address.
    * Valid if ST22P_TX_FLAG_USER_P(R)_MAC is enabled
@@ -985,7 +997,7 @@ struct st22p_rx_ops {
    * interlaced, it's the expected codestream size for each field */
   size_t max_codestream_size;
   /** Optional for ST22P_RX_FLAG_ENABLE_RTCP. RTCP info */
-  struct st_rx_rtcp_ops* rtcp;
+  struct st_rx_rtcp_ops rtcp;
   /**
    * Optional. Callback when frame available in the lib.
    * And only non-block method can be used within this callback as it run from lcore
@@ -1934,8 +1946,22 @@ static inline void st_rxp_para_udp_port_set(struct st_rx_port* p, enum mtl_port 
   p->udp_port[port] = udp_port;
 }
 
+/** Helper to set the port for struct st_tx_port */
+int st_txp_para_port_set(struct st_tx_port* p, enum mtl_session_port port, char* name);
+/** Helper to set the dip for struct st_tx_port */
+int st_txp_para_dip_set(struct st_tx_port* p, enum mtl_port port, char* ip);
+/** Helper to set the udp port number for struct st_tx_port */
+static inline void st_txp_para_udp_port_set(struct st_tx_port* p, enum mtl_port port,
+                                            uint16_t udp_port) {
+  p->udp_port[port] = udp_port;
+}
+
 /** Helper to get the frame addr from struct st_frame */
-static inline mtl_cpuva_t st_frame_addr(struct st_frame* frame, uint8_t plane) {
+static inline void* st_frame_addr(struct st_frame* frame, uint8_t plane) {
+  return frame->addr[plane];
+}
+/** Helper to get the frame addr(mtl_cpuva_t) from struct st_frame */
+static inline mtl_cpuva_t st_frame_addr_cpuva(struct st_frame* frame, uint8_t plane) {
   return (mtl_cpuva_t)frame->addr[plane];
 }
 /** Helper to get the frame iova from struct st_frame */
@@ -1948,6 +1974,13 @@ struct st_frame* st_frame_create(mtl_handle mt, enum st_frame_fmt fmt, uint32_t 
                                  uint32_t h, bool interlaced);
 /** free the frame created by st_frame_create */
 int st_frame_free(struct st_frame* frame);
+
+/** merge two fields to one full frame */
+int st_field_merge(const struct st_frame* first, const struct st_frame* second,
+                   struct st_frame* frame);
+/** split one full frame to two fields */
+int st_field_split(const struct st_frame* frame, struct st_frame* first,
+                   struct st_frame* second);
 
 #if defined(__cplusplus)
 }

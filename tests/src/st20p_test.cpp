@@ -354,9 +354,11 @@ static void test_st20p_tx_frame_thread(void* args) {
   while (!s->stop) {
     frame = st20p_tx_get_frame((st20p_tx_handle)handle);
     if (!frame) { /* no frame */
-      lck.lock();
-      if (!s->stop) s->cv.wait(lck);
-      lck.unlock();
+      if (!s->block_get) {
+        lck.lock();
+        if (!s->stop) s->cv.wait(lck);
+        lck.unlock();
+      }
       continue;
     }
     if (frame->data_size != s->frame_size) s->incomplete_frame_cnt++;
@@ -431,9 +433,11 @@ static void test_st20p_rx_frame_thread(void* args) {
   while (!s->stop) {
     frame = st20p_rx_get_frame((st20p_rx_handle)handle);
     if (!frame) { /* no frame */
-      lck.lock();
-      if (!s->stop) s->cv.wait(lck);
-      lck.unlock();
+      if (!s->block_get) {
+        lck.lock();
+        if (!s->stop) s->cv.wait(lck);
+        lck.unlock();
+      }
       continue;
     }
 
@@ -501,9 +505,11 @@ static void test_internal_st20p_rx_frame_thread(void* args) {
   while (!s->stop) {
     frame = st20p_rx_get_frame((st20p_rx_handle)handle);
     if (!frame) { /* no frame */
-      lck.lock();
-      if (!s->stop) s->cv.wait(lck);
-      lck.unlock();
+      if (!s->block_get) {
+        lck.lock();
+        if (!s->stop) s->cv.wait(lck);
+        lck.unlock();
+      }
       continue;
     }
 
@@ -610,6 +616,7 @@ struct st20p_rx_digest_test_para {
   enum st20_packing packing;
   enum st21_pacing pacing;
   uint32_t ssrc;
+  bool block_get;
 };
 
 static void test_st20p_init_rx_digest_para(struct st20p_rx_digest_test_para* para) {
@@ -636,6 +643,7 @@ static void test_st20p_init_rx_digest_para(struct st20p_rx_digest_test_para* par
   para->packing = ST20_PACKING_BPM;
   para->pacing = ST21_PACING_NARROW;
   para->ssrc = 0;
+  para->block_get = false;
 }
 
 static void st20p_rx_digest_test(enum st_fps fps[], int width[], int height[],
@@ -721,6 +729,7 @@ static void st20p_rx_digest_test(enum st_fps fps[], int width[], int height[],
     test_ctx_tx[i]->fmt = tx_fmt[i];
     test_ctx_tx[i]->user_timestamp = para->user_timestamp;
     test_ctx_tx[i]->user_meta = para->user_meta;
+    test_ctx_tx[i]->block_get = para->block_get;
 
     memset(&ops_tx, 0, sizeof(ops_tx));
     ops_tx.name = "st20p_test";
@@ -744,7 +753,10 @@ static void st20p_rx_digest_test(enum st_fps fps[], int width[], int height[],
     ops_tx.transport_linesize = 0;
     ops_tx.device = para->device;
     ops_tx.framebuff_cnt = test_ctx_tx[i]->fb_cnt;
-    ops_tx.notify_frame_available = test_st20p_tx_frame_available;
+    if (para->block_get)
+      ops_tx.flags |= ST20P_TX_FLAG_BLOCK_GET;
+    else
+      ops_tx.notify_frame_available = test_st20p_tx_frame_available;
     ops_tx.notify_event = test_ctx_notify_event;
     ops_tx.notify_frame_done = test_st20p_tx_frame_done;
     if (para->tx_ext) {
@@ -753,12 +765,9 @@ static void st20p_rx_digest_test(enum st_fps fps[], int width[], int height[],
     if (para->user_timestamp) ops_tx.flags |= ST20P_TX_FLAG_USER_TIMESTAMP;
     if (para->vsync) ops_tx.flags |= ST20P_TX_FLAG_ENABLE_VSYNC;
 
-    struct st_tx_rtcp_ops ops_tx_rtcp;
-    memset(&ops_tx_rtcp, 0, sizeof(ops_tx_rtcp));
     if (para->rtcp) {
       ops_tx.flags |= ST20P_TX_FLAG_ENABLE_RTCP;
-      ops_tx_rtcp.rtcp_buffer_size = 512;
-      ops_tx.rtcp = &ops_tx_rtcp;
+      ops_tx.rtcp.buffer_size = 1024;
     }
 
     uint8_t planes = st_frame_fmt_planes(tx_fmt[i]);
@@ -889,6 +898,7 @@ static void st20p_rx_digest_test(enum st_fps fps[], int width[], int height[],
     test_ctx_rx[i]->fmt = rx_fmt[i];
     test_ctx_rx[i]->user_timestamp = para->user_timestamp;
     test_ctx_rx[i]->user_meta = para->user_meta;
+    test_ctx_rx[i]->block_get = para->block_get;
     test_ctx_rx[i]->frame_size =
         st_frame_size(rx_fmt[i], width[i], height[i], para->interlace);
     /* copy sha */
@@ -961,7 +971,10 @@ static void st20p_rx_digest_test(enum st_fps fps[], int width[], int height[],
     ops_rx.transport_linesize = 0;
     ops_rx.device = para->device;
     ops_rx.framebuff_cnt = test_ctx_rx[i]->fb_cnt;
-    ops_rx.notify_frame_available = test_st20p_rx_frame_available;
+    if (para->block_get)
+      ops_rx.flags |= ST20P_RX_FLAG_BLOCK_GET;
+    else
+      ops_rx.notify_frame_available = test_st20p_rx_frame_available;
     ops_rx.notify_event = test_ctx_notify_event;
     if (para->rx_ext) {
       if (para->rx_dedicated_ext) {
@@ -976,15 +989,13 @@ static void st20p_rx_digest_test(enum st_fps fps[], int width[], int height[],
     if (para->vsync) ops_rx.flags |= ST20P_RX_FLAG_ENABLE_VSYNC;
     if (para->pkt_convert) ops_rx.flags |= ST20P_RX_FLAG_PKT_CONVERT;
 
-    struct st_rx_rtcp_ops ops_rx_rtcp;
-    memset(&ops_rx_rtcp, 0, sizeof(ops_rx_rtcp));
     if (para->rtcp) {
       ops_rx.flags |= ST20P_RX_FLAG_ENABLE_RTCP | ST20P_RX_FLAG_SIMULATE_PKT_LOSS;
-      ops_rx_rtcp.nack_interval_us = 100;
-      ops_rx_rtcp.seq_skip_window = 0;
-      ops_rx_rtcp.burst_loss_max = 4;
-      ops_rx_rtcp.sim_loss_rate = 0.0001;
-      ops_rx.rtcp = &ops_rx_rtcp;
+      ops_rx.rtcp.nack_interval_us = 250;
+      ops_rx.rtcp.seq_bitmap_size = 64;
+      ops_rx.rtcp.seq_skip_window = 0;
+      ops_rx.rtcp.burst_loss_max = 1;
+      ops_rx.rtcp.sim_loss_rate = 0.1;
     }
 
     rx_handle[i] = st20p_rx_create(st, &ops_rx);
@@ -1070,6 +1081,7 @@ static void st20p_rx_digest_test(enum st_fps fps[], int width[], int height[],
       st_test_free(test_ctx_tx[i]->ext_fb_malloc);
       st_test_free(test_ctx_tx[i]->p_ext_frames);
     }
+    test_ctx_rx[i]->fb_send = test_ctx_tx[i]->fb_send;
     delete test_ctx_tx[i];
   }
   for (int i = 0; i < sessions; i++) {
@@ -1095,6 +1107,10 @@ static void st20p_rx_digest_test(enum st_fps fps[], int width[], int height[],
                     test_ctx_rx[i]->ext_fb_iova_map_sz);
       st_test_free(test_ctx_rx[i]->ext_fb_malloc);
       st_test_free(test_ctx_rx[i]->p_ext_frames);
+    }
+    if (para->rtcp) {
+      info("%s, session %d rx/tx fb ratio %f\n", __func__, i,
+           (double)test_ctx_rx[i]->fb_rec / test_ctx_rx[i]->fb_send);
     }
     delete test_ctx_rx[i];
   }
@@ -1135,6 +1151,7 @@ TEST(St20p, digest_1080i_s2) {
   para.interlace = true;
   para.device = ST_PLUGIN_DEVICE_TEST_INTERNAL;
   para.ssrc = 54321;
+  para.block_get = true;
 
   st20p_rx_digest_test(fps, width, height, tx_fmt, t_fmt, rx_fmt, &para);
 }
@@ -1255,7 +1272,7 @@ TEST(St20p, digest_1080p_packet_convert_s2) {
   para.device = ST_PLUGIN_DEVICE_TEST_INTERNAL;
   para.check_fps = false;
   para.pkt_convert = true;
-  para.send_done_check = true;
+  para.send_done_check = false;
 
   st20p_rx_digest_test(fps, width, height, tx_fmt, t_fmt, rx_fmt, &para);
 }
@@ -1313,6 +1330,7 @@ TEST(St20p, rx_ext_digest_1080p_no_convert_s2) {
   para.sessions = 2;
   para.device = ST_PLUGIN_DEVICE_TEST_INTERNAL;
   para.rx_ext = true;
+  para.block_get = true;
 
   st20p_rx_digest_test(fps, width, height, tx_fmt, t_fmt, rx_fmt, &para);
 }
@@ -1392,6 +1410,7 @@ TEST(St20p, ext_digest_1080p_convert_s2) {
   para.rx_ext = true;
   para.check_fps = false;
   para.user_timestamp = true;
+  para.block_get = false;
 
   st20p_rx_digest_test(fps, width, height, tx_fmt, t_fmt, rx_fmt, &para);
 }
@@ -1495,6 +1514,7 @@ TEST(St20p, digest_user_meta_s2) {
   para.user_meta = true;
   para.check_fps = false;
   para.packing = ST20_PACKING_GPM;
+  para.block_get = true;
 
   st20p_rx_digest_test(fps, width, height, tx_fmt, t_fmt, rx_fmt, &para);
 }

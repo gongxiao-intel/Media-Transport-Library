@@ -238,7 +238,6 @@ struct st22_tx_video_info {
 
   struct st22_boxes st22_boxes;
   int st22_total_pkts;
-  int st22_min_pkts;
 };
 
 struct st_vsync_info {
@@ -270,8 +269,6 @@ struct st_tx_video_session_impl {
   struct mt_txq_entry* queue[MTL_SESSION_PORT_MAX];
   int idx; /* index for current tx_session */
   uint64_t advice_sleep_us;
-  uint16_t queue_burst_pkts[MTL_SESSION_PORT_MAX];
-  uint16_t tx_done_cleanup[MTL_SESSION_PORT_MAX];
   int recovery_idx;
 
   struct st_tx_video_session_handle_impl* st20_handle;
@@ -344,11 +341,8 @@ struct st_tx_video_session_impl {
   struct rte_mbuf* pad[MTL_SESSION_PORT_MAX][ST20_PKT_TYPE_MAX];
 
   /* the cpu resource to handle tx, 0: full, 100: cpu is very busy */
-  float cpu_busy_score;
-  int pri_nic_burst_cnt; /* sync to atomic if this reach a threshold */
-  int pri_nic_inflight_cnt;
-  rte_atomic32_t nic_burst_cnt;
-  rte_atomic32_t nic_inflight_cnt;
+  double cpu_busy_score;
+  rte_atomic32_t cbs_build_timeout;
 
   /* info for st22 */
   struct st22_tx_video_info* st22_info;
@@ -382,7 +376,6 @@ struct st_tx_video_session_impl {
   uint32_t stat_user_busy;       /* get_next_frame or dequeue_bulk from rtp ring fail */
   uint32_t stat_lines_not_ready; /* query app lines not ready */
   uint32_t stat_vsync_mismatch;
-  uint32_t stat_tx_done_cleanup;
   uint64_t stat_bytes_tx[MTL_SESSION_PORT_MAX];
   uint32_t stat_user_meta_cnt;
   uint32_t stat_user_meta_pkt_cnt;
@@ -393,6 +386,10 @@ struct st_tx_video_session_impl {
   /* interlace */
   uint32_t stat_interlace_first_field;
   uint32_t stat_interlace_second_field;
+  /* for display */
+  double stat_cpu_busy_score;
+  /* for tasklet session time measure */
+  struct mt_stat_u64 stat_time;
 };
 
 struct st_tx_video_sessions_mgr {
@@ -629,6 +626,8 @@ struct st_rx_video_session_impl {
   struct st20_pgroup st20_pg;
   double frame_time;          /* time of the frame in nanoseconds */
   double frame_time_sampling; /* time of the frame in sampling(90k) */
+  /* in ns for of 2 consecutive packets, T-Frame / N-Packets */
+  double trs;
 
   size_t st20_uframe_size; /* size per user frame */
   struct st20_rx_uframe_pg_meta pg_meta;
@@ -674,14 +673,10 @@ struct st_rx_video_session_impl {
   rte_atomic32_t pkt_lcore_stopped;
 
   /* the cpu resource to handle rx, 0: full, 100: cpu is very busy */
-  float cpu_busy_score;
-  float dma_busy_score;
-  int pri_nic_burst_cnt; /* sync to atomic if this reach a threshold */
-  int pri_nic_inflight_cnt;
-  rte_atomic32_t nic_burst_cnt;
-  rte_atomic32_t nic_inflight_cnt;
+  double cpu_busy_score;
+  double dma_busy_score;
+  double imiss_busy_score;
   rte_atomic32_t dma_previous_busy_cnt;
-  rte_atomic32_t cbs_frame_slot_cnt;
   rte_atomic32_t cbs_incomplete_frame_cnt;
 
   struct mt_rtcp_rx* rtcp_rx[MTL_SESSION_PORT_MAX];
@@ -741,6 +736,10 @@ struct st_rx_video_session_impl {
   uint32_t stat_interlace_second_field;
   /* for st22 */
   uint32_t stat_st22_boxes;
+  /* for stat display */
+  double stat_cpu_busy_score;
+  /* for tasklet session time measure */
+  struct mt_stat_u64 stat_time;
 };
 
 struct st_rx_video_sessions_mgr {
@@ -749,8 +748,6 @@ struct st_rx_video_sessions_mgr {
   int max_idx; /* max session index */
   /* pkt rx task */
   struct mt_sch_tasklet_impl* pkt_rx_tasklet;
-  /* control task */
-  struct mt_sch_tasklet_impl* ctl_tasklet;
 
   struct st_rx_video_session_impl* sessions[ST_SCH_MAX_RX_VIDEO_SESSIONS];
   /* protect session, spin(fast) lock as it call from tasklet aslo */
@@ -843,14 +840,15 @@ struct st_tx_audio_session_impl {
   uint32_t stat_max_notify_frame_us;
   uint32_t stat_unrecoverable_error;
   uint32_t stat_recoverable_error;
+  /* for tasklet session time measure */
+  struct mt_stat_u64 stat_time;
 };
 
 struct st_tx_audio_sessions_mgr {
   struct mtl_main_impl* parent;
   int idx;     /* index for current sessions mgr */
   int max_idx; /* max session index */
-  struct mt_sch_tasklet_impl* tasklet_build;
-  struct mt_sch_tasklet_impl* tasklet_trans;
+  struct mt_sch_tasklet_impl* tasklet;
 
   /* all audio sessions share same ring/queue */
   struct rte_ring* ring[MTL_PORT_MAX];
@@ -963,6 +961,8 @@ struct st_rx_audio_session_impl {
   int st30_stat_pkts_rtp_ring_full;
   uint64_t st30_stat_last_time;
   uint32_t stat_max_notify_frame_us;
+  /* for tasklet session time measure */
+  struct mt_stat_u64 stat_time;
 };
 
 struct st_rx_audio_sessions_mgr {
@@ -1047,6 +1047,8 @@ struct st_tx_ancillary_session_impl {
   uint64_t stat_last_time;
   uint32_t stat_max_next_frame_us;
   uint32_t stat_max_notify_frame_us;
+  /* for tasklet session time measure */
+  struct mt_stat_u64 stat_time;
 };
 
 struct st_tx_ancillary_sessions_mgr {
@@ -1099,6 +1101,8 @@ struct st_rx_ancillary_session_impl {
   int st40_stat_pkts_received;
   uint64_t st40_stat_last_time;
   uint32_t stat_max_notify_rtp_us;
+  /* for tasklet session time measure */
+  struct mt_stat_u64 stat_time;
 };
 
 struct st_rx_ancillary_sessions_mgr {

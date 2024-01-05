@@ -335,6 +335,9 @@ The Get/Put API is straightforward to use; consider the following example:
 
 Sample application code can be find at [tx_st20_pipeline_sample.c](../app/sample/tx_st20_pipeline_sample.c) and [rx_st20_pipeline_sample.c](../app/sample/rx_st20_pipeline_sample.c)
 
+By default, the `st20p_tx_get_frame` and `st20p_rx_get_frame` functions operate in non-blocking mode, which means the function call will immediately return `NULL` if no frame is available.
+To switch to blocking mode, where the call will wait until a frame is ready for application use or one second timeout occurs, you must enable the `ST20P_TX_FLAG_BLOCK_GET` or `ST20P_RX_FLAG_BLOCK_GET` flag respectively during the session creation stage.
+
 ### 6.4 ST22 support
 
 The support for ST 2110-22 JPEG XS can be categorized into two modes: ST 2110-22 raw codestream mode and ST 2110-22 pipeline mode. The pipeline mode leverages an IMTL plugin to handle the decoding/encoding between the raw video buffer and the codestream.
@@ -357,6 +360,9 @@ Thanks to the plugin, the application can implement ST22 support using the follo
 The plugin guide can be find at [plugin](./plugin.md), the pipeline detail implementation can be find from [st22_pipeline_tx.c](../lib/src/st2110/pipeline/st22_pipeline_tx.c) and [st22_pipeline_rx.c](../lib/src/st2110/pipeline/st22_pipeline_rx.c).
 
 Sample application code can be find at [tx_st22_pipeline_sample.c](../app/sample/tx_st22_pipeline_sample.c) and [rx_st22_pipeline_sample.c](../app/sample/rx_st22_pipeline_sample.c)
+
+By default, the `st22p_tx_get_frame` and `st22p_rx_get_frame` functions operate in non-blocking mode, which means the function call will immediately return `NULL` if no frame is available.
+To switch to blocking mode, where the call will wait until a frame is ready for application use or one second timeout occurs, you must enable the `ST22P_TX_FLAG_BLOCK_GET` or `ST22P_RX_FLAG_BLOCK_GET` flag respectively during the session creation stage.
 
 #### 6.4.2 ST22 codestream mode
 
@@ -407,7 +413,9 @@ The TX side maintains a buffer ring that retains recently transmitted packets. U
 
 It's important to be mindful that the RTCP retransmission method used by IMTL for packet loss recovery is not a standardized feature within the SMPTE ST 2110 suite. Consequently, this approach may not be compatible with non-IMTL implementations.
 
-It can be enabled by `ST**_TX_FLAG_ENABLE_RTCP` and `ST**_RX_FLAG_ENABLE_RTCP`, and the configuration for RTCP can be customized by `struct st_tx_rtcp_ops` and `struct st_rx_rtcp_ops`.
+It can be enabled by `ST**_TX_FLAG_ENABLE_RTCP` and `ST**_RX_FLAG_ENABLE_RTCP`, and the configuration for RTCP can be customized by `ops.rtcp` (`struct st_tx_rtcp_ops` and `struct st_rx_rtcp_ops`).
+
+For more details, please refer to [RTCP doc](rtcp.md).
 
 ### 6.9 External frame
 
@@ -467,3 +475,44 @@ Intel® Media SDK: Leverage IMTL's robust capabilities within Intel® Media SDK 
 ### 6.15 Sample code
 
 In addition to the built-in RxTxApp, IMTL also provides numerous sample codes that demonstrate how to construct simple test programs using its APIs. For more details, please refer to [sample](../app/sample/). We also provide some very useful forward application demo, detail can be found at [fwd](../app/sample/fwd/).
+
+## 7. Misc
+
+### 7.1 Logging
+
+By default, MTL uses the DPDK `RTE_LOG` for outputting logs.
+
+Log levels are governed by the `enum mtl_log_level` definition. During the initialization stage, the log level can be customized using the `enum mtl_log_level log_level;` field within the `struct mtl_init_params`. Additionally, the log level can be altered at runtime using the `mtl_set_log_level` and `mtl_get_log_level` APIs.
+
+To save the `RTE_LOG` output to a file, please use the `mtl_openlog_stream` API with a pointer to a `FILE*` as an argument.
+
+MTL logging includes a timestamp prefix with each output to indicate the timing with second-level accuracy. If millisecond-level accuracy is required, use the `mtl_set_log_prefix_formatter` function to define a custom prefix. Below is an example of a user-defined prefix formatter that includes milliseconds:
+
+```bash
+static void log_prefix_time_ms(char* buf, size_t sz) {
+  struct timespec ts;
+  struct tm tm;
+  char time_s_buf[64];
+
+  clock_gettime(CLOCK_REALTIME, &ts);
+  localtime_r(&ts.tv_sec, &tm);
+  strftime(time_s_buf, sizeof(time_s_buf), "%Y-%m-%d %H:%M:%S", &tm);
+  snprintf(buf, sz, "%s.%u, ", time_s_buf, (uint32_t)(ts.tv_nsec / NS_PER_MS));
+}
+```
+
+Applications can register a custom log printer by utilizing the `mtl_set_log_printer` API. This ensures that whenever MTL requires logging, the specified callback function is executed. Below is an example of a callback implementation; note that a variadic argument list is passed using `va_list`, and `vprintf` is utilized to handle the logging:
+
+```bash
+static void log_user_printer(enum mtl_log_level level, const char* format, ...) {
+  MTL_MAY_UNUSED(level);
+  va_list args;
+
+  /* Init variadic argument list */
+  va_start(args, format);
+  /* Use vprintf to pass the variadic arguments to printf */
+  vprintf(format, args);
+  /* End variadic argument list */
+  va_end(args);
+}
+```

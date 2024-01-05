@@ -4,6 +4,7 @@
 
 #include <getopt.h>
 #include <inttypes.h>
+#include <stdarg.h>
 
 #include "app_base.h"
 #define DEBUG
@@ -56,6 +57,8 @@ enum st_args_cmd {
   ST_ARG_TIMESTAMP_EPOCH,
   ST_ARG_TIMESTAMP_DELTA_US,
   ST_ARG_NO_BULK,
+  ST_ARG_TX_DISPLAY,
+  ST_ARG_RX_DISPLAY,
 
   ST_ARG_CONFIG_FILE = 0x300,
   ST_ARG_TEST_TIME,
@@ -78,6 +81,7 @@ enum st_args_cmd {
   ST_ARG_LOG_LEVEL,
   ST_ARG_LOG_FILE,
   ST_ARG_LOG_TIME_MS,
+  ST_ARG_LOG_PRINTER,
   ST_ARG_NB_TX_DESC,
   ST_ARG_NB_RX_DESC,
   ST_ARG_DMA_DEV,
@@ -177,6 +181,8 @@ static struct option st_app_args_options[] = {
     {"ts_first_pkt", no_argument, 0, ST_ARG_TIMESTAMP_FIRST_PKT},
     {"ts_delta_us", required_argument, 0, ST_ARG_TIMESTAMP_DELTA_US},
     {"no_bulk", no_argument, 0, ST_ARG_NO_BULK},
+    {"tx_display", no_argument, 0, ST_ARG_TX_DISPLAY},
+    {"rx_display", no_argument, 0, ST_ARG_RX_DISPLAY},
 
     {"config_file", required_argument, 0, ST_ARG_CONFIG_FILE},
     {"test_time", required_argument, 0, ST_ARG_TEST_TIME},
@@ -192,6 +198,7 @@ static struct option st_app_args_options[] = {
     {"log_level", required_argument, 0, ST_ARG_LOG_LEVEL},
     {"log_file", required_argument, 0, ST_ARG_LOG_FILE},
     {"log_time_ms", no_argument, 0, ST_ARG_LOG_TIME_MS},
+    {"log_printer", no_argument, 0, ST_ARG_LOG_PRINTER},
     {"ptp", no_argument, 0, ST_ARG_LIB_PTP},
     {"phc2sys", no_argument, 0, ST_ARG_LIB_PHC2SYS},
     {"ptp_sync_sys", no_argument, 0, ST_ARG_LIB_PTP_SYNC_SYS},
@@ -353,6 +360,37 @@ static void log_prefix_time_ms(char* buf, size_t sz) {
   snprintf(buf, sz, "%s.%u, ", time_s_buf, (uint32_t)(ts.tv_nsec / NS_PER_MS));
 }
 
+static void log_user_printer(enum mtl_log_level level, const char* format, ...) {
+  MTL_MAY_UNUSED(level);
+  va_list args;
+
+  /* Init variadic argument list */
+  va_start(args, format);
+  /* Use vprintf to pass the variadic arguments to printf */
+  vprintf(format, args);
+  /* End variadic argument list */
+  va_end(args);
+}
+
+static int app_args_parse_port(struct st_app_context* ctx, struct mtl_init_params* p,
+                               char* str, enum mtl_port port) {
+  st_json_context_t* json_ctx = ctx->json_ctx;
+  if (json_ctx) {
+    int json_num_interfaces = json_ctx->num_interfaces;
+    st_json_interface_t* json_interfaces = &json_ctx->interfaces[port];
+    if (port < json_num_interfaces) {
+      info("%s, override json interface for port: %d to %s\n", __func__, port, str);
+      snprintf(json_interfaces->name, sizeof(json_interfaces->name), "%s", str);
+      snprintf(p->port[port], sizeof(p->port[port]), "%s", str);
+    }
+  } else {
+    snprintf(p->port[port], sizeof(p->port[port]), "%s", str);
+    p->num_ports++;
+  }
+
+  return 0;
+}
+
 int st_app_parse_args(struct st_app_context* ctx, struct mtl_init_params* p, int argc,
                       char** argv) {
   int cmd = -1, optIdx = 0;
@@ -365,12 +403,10 @@ int st_app_parse_args(struct st_app_context* ctx, struct mtl_init_params* p, int
 
     switch (cmd) {
       case ST_ARG_P_PORT:
-        snprintf(p->port[MTL_PORT_P], sizeof(p->port[MTL_PORT_P]), "%s", optarg);
-        p->num_ports++;
+        app_args_parse_port(ctx, p, optarg, MTL_PORT_P);
         break;
       case ST_ARG_R_PORT:
-        snprintf(p->port[MTL_PORT_R], sizeof(p->port[MTL_PORT_R]), "%s", optarg);
-        p->num_ports++;
+        app_args_parse_port(ctx, p, optarg, MTL_PORT_R);
         break;
       case ST_ARG_P_SIP:
         inet_pton(AF_INET, optarg, mtl_p_sip_addr(p));
@@ -507,6 +543,12 @@ int st_app_parse_args(struct st_app_context* ctx, struct mtl_init_params* p, int
       case ST_ARG_NO_BULK:
         ctx->tx_no_bulk = true;
         break;
+      case ST_ARG_TX_DISPLAY:
+        ctx->tx_display = true;
+        break;
+      case ST_ARG_RX_DISPLAY:
+        ctx->rx_display = true;
+        break;
       case ST_ARG_SHAPING:
         if (!strcmp(optarg, "narrow"))
           ctx->tx_pacing_type = ST21_PACING_NARROW;
@@ -598,7 +640,7 @@ int st_app_parse_args(struct st_app_context* ctx, struct mtl_init_params* p, int
         else if (!strcmp(optarg, "warning"))
           p->log_level = MTL_LOG_LEVEL_WARNING;
         else if (!strcmp(optarg, "error"))
-          p->log_level = MTL_LOG_LEVEL_ERROR;
+          p->log_level = MTL_LOG_LEVEL_ERR;
         else
           err("%s, unknow log level %s\n", __func__, optarg);
         app_set_log_level(p->log_level);
@@ -608,6 +650,9 @@ int st_app_parse_args(struct st_app_context* ctx, struct mtl_init_params* p, int
         break;
       case ST_ARG_LOG_TIME_MS:
         mtl_set_log_prefix_formatter(log_prefix_time_ms);
+        break;
+      case ST_ARG_LOG_PRINTER:
+        mtl_set_log_printer(log_user_printer);
         break;
       case ST_ARG_NB_TX_DESC:
         p->nb_tx_desc = atoi(optarg);

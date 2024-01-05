@@ -278,6 +278,22 @@ ffmpeg -s 1920x1080 -pix_fmt yuv420p10le -i yuv420p10le_1080p.yuv -pix_fmt yuv44
 ./build/app/ConvApp -width 1920 -height 1080 -in_pix_fmt yuv444rfc4175be12 -i yuv444rfc4175be12_1080p.yuv -out_pix_fmt yuv444p12le -o out_yuv444p12le_1080p.yuv
 ```
 
+#### 5.1.8 Interlaced support
+
+ConvApp offers a `frame2field` option to convert a progressive YUV file into an interlaced file. The interlaced YUV file stores the first field followed by the second field, repeating this sequence.
+
+For yuv422p10le:
+
+```bash
+./build/app/ConvApp --in_pix_fmt yuv422p10le --width 1920 --height 1080 --i yuv422p10le_1080p.yuv --o yuv422p10le_1080i.yuv --frame2field
+```
+
+For yuv422rfc4175be10:
+
+```bash
+./build/app/ConvApp --in_pix_fmt yuv422rfc4175be10 --width 1920 --height 1080 --i yuv422rfc4175be10_1080p.yuv --o yuv422rfc4175be10_1080i.yuv --frame2field
+```
+
 ### 5.2 Run RxTxApp with json config
 
 Before running samples the JSON configuration files must be modified. The "name" tag in "interfaces" must be updated to VF BDF, e.g 0000:af:01.0.  No other changes are required to run samples.
@@ -445,8 +461,6 @@ You need to repeat below steps to create Virtual Functions (VF), bind the VF to 
 ```bash
 # replace "0000:a1:00.0" with the port on your setup
 sudo ./script/nicctl.sh create_vf 0000:a1:00.0
-# add VFIO device permissions for current user
-sudo chown -R $USER:$USER /dev/vfio/
 # setup hugepages, the number(2048) is dependent on the workloads you wish to execute.
 sudo sysctl -w vm.nr_hugepages=2048
 ```
@@ -509,7 +523,7 @@ ST: st_init, mbuf_pool create fail
 
 ### 8.5 No access to vfio device
 
-If you encounter the following error message, please grant the current user access to the dev:
+If you encounter the following error message, please check section 3.1 to create a group vfio and add the current user to the group:
 
 ```bash
 EAL: Cannot open /dev/vfio/147: Permission denied
@@ -615,6 +629,8 @@ find / -name librte_dmadev.so.23
 ```bash
 # Note to change the path as the find result
 export LD_LIBRARY_PATH=/usr/local/lib64/
+# Or use ldconfig to update the cache
+sudo ldconfig
 ```
 
 ### 8.15 Fail to init lcore

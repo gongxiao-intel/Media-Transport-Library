@@ -70,13 +70,10 @@ static int sch_tasklet_sleep(struct mtl_main_impl* impl, struct mtl_sch_impl* sc
   if (sleep_us < mt_sch_zero_sleep_thresh_us(impl)) {
     mt_sleep_ms(0);
   } else {
-    struct timespec abs_time;
-    clock_gettime(MT_THREAD_TIMEDWAIT_CLOCK_ID, &abs_time);
-    abs_time.tv_sec += 1; /* timeout 1s */
-
     rte_eal_alarm_set(sleep_us, sch_sleep_alarm_handler, sch);
     mt_pthread_mutex_lock(&sch->sleep_wake_mutex);
-    mt_pthread_cond_timedwait(&sch->sleep_wake_cond, &sch->sleep_wake_mutex, &abs_time);
+    /* timeout 1s */
+    mt_pthread_cond_timedwait_ns(&sch->sleep_wake_cond, &sch->sleep_wake_mutex, NS_PER_S);
     mt_pthread_mutex_unlock(&sch->sleep_wake_mutex);
   }
   uint64_t end = mt_get_tsc(impl);
@@ -111,6 +108,8 @@ static int sch_tasklet_func(void* args) {
   struct mt_sch_tasklet_impl* tasklet;
   bool time_measure = mt_user_tasklet_time_measure(impl);
   uint64_t tsc_s = 0;
+  uint64_t loop_cal_start_ns;
+  uint64_t loop_cnt = 0;
 
   num_tasklet = sch->max_tasklet_idx;
   info("%s(%d), start with %d tasklets\n", __func__, idx, num_tasklet);
@@ -128,6 +127,7 @@ static int sch_tasklet_func(void* args) {
   }
 
   sch->sleep_ratio_start_ns = mt_get_tsc(impl);
+  loop_cal_start_ns = mt_get_tsc(impl);
 
   while (rte_atomic32_read(&sch->request_stop) == 0) {
     int pending = MTL_TASKLET_ALL_DONE;
@@ -146,15 +146,21 @@ static int sch_tasklet_func(void* args) {
       if (time_measure) tsc_s = mt_get_tsc(impl);
       pending += ops->handler(ops->priv);
       if (time_measure) {
-        uint32_t delta_us = (mt_get_tsc(impl) - tsc_s) / NS_PER_US;
-        tasklet->stat_max_time_us = RTE_MAX(tasklet->stat_max_time_us, delta_us);
-        tasklet->stat_min_time_us = RTE_MIN(tasklet->stat_min_time_us, delta_us);
-        tasklet->stat_sum_time_us += delta_us;
-        tasklet->stat_time_cnt++;
+        uint64_t delta_ns = mt_get_tsc(impl) - tsc_s;
+        mt_stat_u64_update(&tasklet->stat_time, delta_ns);
       }
     }
     if (sch->allow_sleep && (pending == MTL_TASKLET_ALL_DONE)) {
       sch_tasklet_sleep(impl, sch);
+    }
+
+    loop_cnt++;
+    /* cal avg_ns_per_loop per two second */
+    uint64_t delta_loop_ns = mt_get_tsc(impl) - loop_cal_start_ns;
+    if (delta_loop_ns > ((uint64_t)NS_PER_S * 2)) {
+      sch->avg_ns_per_loop = delta_loop_ns / loop_cnt;
+      loop_cnt = 0;
+      loop_cal_start_ns = mt_get_tsc(impl);
     }
   }
 
@@ -363,37 +369,30 @@ static bool sch_is_capable(struct mtl_sch_impl* sch, int quota_mbs,
     return true;
 }
 
-static void sch_tasklet_stat_clear(struct mt_sch_tasklet_impl* tasklet) {
-  tasklet->stat_max_time_us = 0;
-  tasklet->stat_min_time_us = (uint32_t)-1;
-  tasklet->stat_sum_time_us = 0;
-  tasklet->stat_time_cnt = 0;
-}
-
 static int sch_stat(void* priv) {
   struct mtl_sch_impl* sch = priv;
   int num_tasklet = sch->max_tasklet_idx;
   struct mt_sch_tasklet_impl* tasklet;
   int idx = sch->idx;
-  uint32_t avg_us;
 
   if (!mt_sch_is_active(sch)) return 0;
 
-  notice("SCH(%d:%s): tasklets %d max idx %d, lcore %u\n", idx, sch->name, num_tasklet,
-         sch->max_tasklet_idx, sch->lcore);
+  notice("SCH(%d:%s): tasklets %d, lcore %u, avg loop %" PRIu64 " ns\n", idx, sch->name,
+         num_tasklet, sch->lcore, mt_sch_avg_ns_loop(sch));
   if (mt_user_tasklet_time_measure(sch->parent)) {
     for (int i = 0; i < num_tasklet; i++) {
       tasklet = sch->tasklet[i];
       if (!tasklet) continue;
 
       dbg("SCH(%d): tasklet %s at %d\n", idx, tasklet->name, i);
-      if (tasklet->stat_time_cnt) {
-        avg_us = tasklet->stat_sum_time_us / tasklet->stat_time_cnt;
-        notice("SCH(%d,%d): tasklet %s, avg %uus max %uus min %uus\n", idx, i,
-               tasklet->name, avg_us, tasklet->stat_max_time_us,
-               tasklet->stat_min_time_us);
-        sch_tasklet_stat_clear(tasklet);
+      struct mt_stat_u64* stat_time = &tasklet->stat_time;
+      if (stat_time->cnt) {
+        uint64_t avg_ns = stat_time->sum / stat_time->cnt;
+        notice("SCH(%d,%d): tasklet %s, avg %.2fus max %.2fus min %.2fus\n", idx, i,
+               tasklet->name, (float)avg_ns / NS_PER_US,
+               (float)stat_time->max / NS_PER_US, (float)stat_time->min / NS_PER_US);
       }
+      mt_stat_u64_init(stat_time);
     }
   }
 
@@ -792,7 +791,7 @@ mtl_tasklet_handle mtl_sch_register_tasklet(struct mtl_sch_impl* sch,
     snprintf(tasklet->name, ST_MAX_NAME_LEN - 1, "%s", tasklet_ops->name);
     tasklet->sch = sch;
     tasklet->idx = i;
-    sch_tasklet_stat_clear(tasklet);
+    mt_stat_u64_init(&tasklet->stat_time);
 
     sch->tasklet[i] = tasklet;
     sch->max_tasklet_idx = RTE_MAX(sch->max_tasklet_idx, i + 1);
@@ -840,14 +839,7 @@ int mt_sch_mrg_init(struct mtl_main_impl* impl, int data_quota_mbs_limit) {
 
     /* sleep info init */
     sch->allow_sleep = mt_user_tasklet_sleep(impl);
-#if MT_THREAD_TIMEDWAIT_CLOCK_ID != CLOCK_REALTIME
-    pthread_condattr_t attr;
-    pthread_condattr_init(&attr);
-    pthread_condattr_setclock(&attr, MT_THREAD_TIMEDWAIT_CLOCK_ID);
-    mt_pthread_cond_init(&sch->sleep_wake_cond, &attr);
-#else
-    mt_pthread_cond_init(&sch->sleep_wake_cond, NULL);
-#endif
+    mt_pthread_cond_wait_init(&sch->sleep_wake_cond);
     mt_pthread_mutex_init(&sch->sleep_wake_mutex, NULL);
 
     sch->stat_sleep_ns_min = -1;

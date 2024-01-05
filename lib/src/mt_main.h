@@ -452,10 +452,8 @@ struct mt_sch_tasklet_impl {
   bool request_exit;
   bool ack_exit;
 
-  uint32_t stat_max_time_us;
-  uint64_t stat_sum_time_us;
-  uint64_t stat_time_cnt;
-  uint32_t stat_min_time_us;
+  /* for time measure */
+  struct mt_stat_u64 stat_time;
 };
 
 enum mt_sch_type {
@@ -531,6 +529,8 @@ struct mtl_sch_impl {
   bool allow_sleep;
   pthread_cond_t sleep_wake_cond;
   pthread_mutex_t sleep_wake_mutex;
+
+  uint64_t avg_ns_per_loop;
 
   /* the sch sleep ratio */
   float sleep_ratio_score;
@@ -697,6 +697,7 @@ struct mt_interface {
   struct mtl_port_status* dev_stats_sw;        /* for MT_DRV_F_NOT_DPDK_PMD */
   struct mtl_port_status stats_sum;            /* for dev_inf_stat dump */
   struct mtl_port_status user_stats_port;      /* for mtl_get_port_stats */
+  struct mtl_port_status stats_admin;          /* stats used in admin task */
 
   uint64_t simulate_malicious_pkt_tsc;
 
